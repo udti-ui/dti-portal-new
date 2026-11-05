@@ -8,6 +8,8 @@ type ChatBan = {
   student_name: string;
   created_at: string;
   banned_by: string;
+  expires_at?: string | null;
+  reason?: string | null;
 };
 
 type ChatMessage = {
@@ -22,16 +24,22 @@ type ChatMessage = {
   attachment_type?: string | null;
   attachment_size?: number | null;
   avatar_url?: string | null;
+  is_support_staff?: boolean;
 };
 
 type SupervisorChatManagementProps = {
   supervisorUsername: string;
   supervisorPassword: string;
+  supportStudentId?: string;
 };
 
 const requestErrorMessages: Record<string, string> = {
   'first-degree-supervisor-required': 'إدارة الدردشة متاحة لمشرفي الدرجة الأولى فقط.',
   'supervisor-credentials-invalid': 'انتهت صلاحية جلسة المشرف. سجّل الدخول مجددًا.',
+  'support-credentials-invalid': 'انتهت صلاحية جلسة الدعم. سجّل الدخول مجددًا.',
+  'support-role-inactive': 'تم سحب صلاحية قسم الدعم لهذا الحساب.',
+  'support-staff-lookup-failed': 'تعذر التحقق من صلاحية قسم الدعم.',
+  'support-action-not-allowed': 'لا تملك صلاحية تنفيذ هذا الإجراء.',
   'student-not-found': 'لم يُعثر على طالب بهذا الرقم الجامعي.',
   'chat-settings-not-configured': 'شغّل ملف supabase-student-chat.sql في مشروع Supabase.',
   'chat-service-not-configured': 'تعذر الاتصال بخدمة الدردشة. تحقق من إعداد الخادم.',
@@ -39,12 +47,20 @@ const requestErrorMessages: Record<string, string> = {
   'chat-settings-update-failed': 'تعذر حفظ حالة الدردشة.',
   'chat-ban-save-failed': 'تعذر حظر الطالب.',
   'chat-unban-failed': 'تعذر إلغاء الحظر.',
+  'mute-details-required': 'اختر سنة المحادثة واكتب سبب الكتم.',
+  'chat-mute-save-failed': 'تعذر كتم الطالب.',
+  'cannot-mute-self': 'لا يمكن كتم حسابك.',
+  'cannot-mute-support-staff': 'لا يمكن لموظف الدعم كتم حساب دعم آخر.',
+  'student-year-mismatch': 'السنة الدراسية للحساب لا تطابق سنة الدردشة المحددة.',
+  'student-permanently-banned': 'الطالب محظور حظرًا دائمًا من المشرف، ولم يتم تغيير حالة الحظر.',
 };
 
 export default function SupervisorChatManagement({
   supervisorUsername,
   supervisorPassword,
+  supportStudentId,
 }: SupervisorChatManagementProps) {
+  const supportMode = Boolean(supportStudentId);
   const [isOpen, setIsOpen] = useState(false);
   const [isOpenFirst, setIsOpenFirst] = useState(true);
   const [isOpenSecond, setIsOpenSecond] = useState(true);
@@ -65,7 +81,13 @@ export default function SupervisorChatManagement({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
-      body: JSON.stringify({ action, supervisorUsername, supervisorPassword, ...extra }),
+      body: JSON.stringify({
+        action,
+        ...(supportMode
+          ? { supportStudentId, supportPassword: supervisorPassword }
+          : { supervisorUsername, supervisorPassword }),
+        ...extra,
+      }),
     });
     const result = await response.json() as {
       success?: boolean;
@@ -81,7 +103,7 @@ export default function SupervisorChatManagement({
       throw new Error(requestErrorMessages[result.error ?? ''] ?? 'تعذر تنفيذ العملية.');
     }
     return result;
-  }, [supervisorUsername, supervisorPassword]);
+  }, [supportMode, supportStudentId, supervisorUsername, supervisorPassword]);
 
   const loadState = useCallback(async (showLoading = false) => {
     if (showLoading) setLoading(true);
@@ -202,24 +224,44 @@ export default function SupervisorChatManagement({
     }
   };
 
+  const muteStudent = async (targetStudentId: string, targetYear: 'أولى' | 'ثانية') => {
+    const reason = window.prompt('اكتب سبب كتم الطالب لمدة 24 ساعة:')?.trim();
+    if (!reason) return;
+    setSaving(true);
+    setMessage('');
+    try {
+      await request('mute-student', { studentId: targetStudentId, studentYear: targetYear, reason });
+      setMessage('تم كتم الطالب لمدة 24 ساعة، وسُجل السبب في سجل النظام.');
+      setError(false);
+      await loadState();
+    } catch (cause) {
+      setMessage(cause instanceof Error ? cause.message : 'تعذر كتم الطالب.');
+      setError(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <section className="admin-dashboard-panel">
       <div className="admin-dashboard-heading">
         <div>
-          <span className="feature-panel-kicker">إدارة تواصل الطلاب</span>
-          <h1>دردشة الطلاب</h1>
-          <p>تحكم بالدردشة لكل سنة على حدة، أو أوقف الدردشة عن جميع الطلاب.</p>
+          <span className="feature-panel-kicker">{supportMode ? 'متابعة دردشة الطلاب' : 'إدارة تواصل الطلاب'}</span>
+          <h1>{supportMode ? 'قسم دعم الدردشة' : 'دردشة الطلاب'}</h1>
+          <p>{supportMode ? 'تابع دردشة السنة الأولى أو الثانية، ويمكنك كتم الطالب 24 ساعة مع توضيح السبب.' : 'تحكم بالدردشة لكل سنة على حدة، أو أوقف الدردشة عن جميع الطلاب.'}</p>
         </div>
-        <button type="button" className={`action-button ${isOpen ? 'danger' : 'primary'}`} onClick={() => void toggleChat()} disabled={loading || saving}>
-          {saving ? 'جارٍ الحفظ...' : isOpen ? 'إغلاق الدردشة للسنتين' : 'فتح الدردشة للسنتين'}
-        </button>
+        {!supportMode && (
+          <button type="button" className={`action-button ${isOpen ? 'danger' : 'primary'}`} onClick={() => void toggleChat()} disabled={loading || saving}>
+            {saving ? 'جارٍ الحفظ...' : isOpen ? 'إغلاق الدردشة للسنتين' : 'فتح الدردشة للسنتين'}
+          </button>
+        )}
       </div>
 
       <p role={error ? 'alert' : 'status'} className={`teacher-account-notice ${error ? 'error' : 'success'}`}>
-        {message || (isOpen ? 'الدردشة مفعّلة؛ حالة كل سنة تظهر أدناه.' : 'الدردشة متوقفة لجميع الطلاب.')}
+        {message || (supportMode ? 'تظهر أحدث الرسائل تلقائيًا كل 15 ثانية.' : isOpen ? 'الدردشة مفعّلة؛ حالة كل سنة تظهر أدناه.' : 'الدردشة متوقفة لجميع الطلاب.')}
       </p>
 
-      <div className="supervisor-chat-year-controls">
+      {!supportMode && <div className="supervisor-chat-year-controls">
         {([
           { year: 'أولى' as const, isYearOpen: isOpenFirst },
           { year: 'ثانية' as const, isYearOpen: isOpenSecond },
@@ -244,7 +286,7 @@ export default function SupervisorChatManagement({
             </article>
           );
         })}
-      </div>
+      </div>}
 
       <section className="supervisor-chat-messages-panel" aria-labelledby="supervisor-chat-messages-title">
         <div className="supervisor-chat-messages-heading">
@@ -282,7 +324,10 @@ export default function SupervisorChatManagement({
                       : chatMessage.student_name.charAt(0)}
                   </span>
                   <div>
-                    <strong>{chatMessage.student_name}</strong>
+                    <strong className={chatMessage.is_support_staff ? 'chat-support-name' : ''}>
+                      {chatMessage.student_name}
+                      {chatMessage.is_support_staff && <span className="chat-support-badge">دعم</span>}
+                    </strong>
                   </div>
                   <time dateTime={chatMessage.created_at}>
                     {new Date(chatMessage.created_at).toLocaleString('ar-SY')}
@@ -296,7 +341,18 @@ export default function SupervisorChatManagement({
                     studentYear={selectedYear}
                     supervisorUsername={supervisorUsername}
                     supervisorPassword={supervisorPassword}
+                    supportStudentId={supportStudentId}
                   />
+                )}
+                {supportMode && !chatMessage.is_support_staff && (
+                  <button
+                    type="button"
+                    className="action-button danger"
+                    onClick={() => void muteStudent(chatMessage.student_id, selectedYear)}
+                    disabled={saving}
+                  >
+                    كتم الطالب 24 ساعة
+                  </button>
                 )}
               </article>
             ))}
@@ -306,7 +362,7 @@ export default function SupervisorChatManagement({
         )}
       </section>
 
-      <form onSubmit={(event) => void banStudent(event)} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'end', margin: '22px 0' }}>
+      {!supportMode && <form onSubmit={(event) => void banStudent(event)} style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'end', margin: '22px 0' }}>
         <label style={{ display: 'grid', gap: 6 }}>
           <span>حظر طالب بالرقم الجامعي</span>
           <input value={studentId} onChange={(event) => setStudentId(event.target.value)} maxLength={80} required placeholder="الرقم الجامعي" />
@@ -314,9 +370,9 @@ export default function SupervisorChatManagement({
         <button type="submit" className="action-button danger" disabled={saving || !studentId.trim()}>
           حظر الطالب
         </button>
-      </form>
+      </form>}
 
-      <h2 style={{ fontSize: 18 }}>الطلاب المحظورون ({bans.length})</h2>
+      <h2 style={{ fontSize: 18 }}>{supportMode ? `حالات الكتم (${bans.filter((ban) => ban.expires_at && Date.parse(ban.expires_at) > Date.now()).length})` : `الطلاب المحظورون (${bans.length})`}</h2>
       {loading ? (
         <div className="loading-box">جارٍ تحميل إعدادات الدردشة...</div>
       ) : bans.length ? (
@@ -325,10 +381,12 @@ export default function SupervisorChatManagement({
             <article className="admin-record-item" key={ban.student_id}>
               <strong>{ban.student_name}</strong>
               <span>الرقم الجامعي: {ban.student_id}</span>
-              <span>تاريخ الحظر: {new Date(ban.created_at).toLocaleString('ar-SY')} · المشرف: {ban.banned_by}</span>
-              <button type="button" className="action-button" onClick={() => void unbanStudent(ban.student_id)} disabled={saving}>
+              <span>تاريخ الإجراء: {new Date(ban.created_at).toLocaleString('ar-SY')} · المسؤول: {ban.banned_by}</span>
+              {ban.expires_at && <span>ينتهي: {new Date(ban.expires_at).toLocaleString('ar-SY')}</span>}
+              {ban.reason && <span>السبب: {ban.reason}</span>}
+              {!supportMode && <button type="button" className="action-button" onClick={() => void unbanStudent(ban.student_id)} disabled={saving}>
                 إلغاء الحظر
-              </button>
+              </button>}
             </article>
           ))}
         </div>
@@ -344,11 +402,13 @@ function SupervisorChatAttachment({
   studentYear,
   supervisorUsername,
   supervisorPassword,
+  supportStudentId,
 }: {
   message: ChatMessage;
   studentYear: 'أولى' | 'ثانية';
   supervisorUsername: string;
   supervisorPassword: string;
+  supportStudentId?: string;
 }) {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -369,8 +429,9 @@ function SupervisorChatAttachment({
         cache: 'no-store',
         body: JSON.stringify({
           action: 'admin-get-attachment',
-          supervisorUsername,
-          supervisorPassword,
+          ...(supportStudentId
+            ? { supportStudentId, supportPassword: supervisorPassword }
+            : { supervisorUsername, supervisorPassword }),
           studentYear,
           messageId: message.id,
         }),
@@ -401,7 +462,7 @@ function SupervisorChatAttachment({
     } finally {
       setLoading(false);
     }
-  }, [message.attachment_name, message.attachment_type, message.id, studentYear, supervisorPassword, supervisorUsername]);
+  }, [message.attachment_name, message.attachment_type, message.id, studentYear, supportStudentId, supervisorPassword, supervisorUsername]);
 
   useEffect(() => {
     if (isImage) void openAttachment();

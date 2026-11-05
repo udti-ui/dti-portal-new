@@ -1,6 +1,15 @@
-const escapeHtml = (value: string | number | null | undefined) => {
+const TELEGRAM_PORTAL_URL = 'https://my-dti.netlify.app/';
+const TELEGRAM_PORTAL_FOOTER = `━━━━━━━━━━━━━━━━━━\n🌐 <b>بوابة المعهد:</b> ${TELEGRAM_PORTAL_URL}`;
+
+export const escapeTelegramHtml = (value: string | number | null | undefined) => {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 };
+
+export function appendTelegramPortalFooter(message: string) {
+  const trimmedMessage = message.trimEnd();
+  if (trimmedMessage.endsWith(TELEGRAM_PORTAL_FOOTER)) return trimmedMessage;
+  return `${trimmedMessage}\n\n${TELEGRAM_PORTAL_FOOTER}`;
+}
 
 export function buildStudentTelegramMessage({
   studentName,
@@ -20,15 +29,15 @@ export function buildStudentTelegramMessage({
   title?: string;
 }) {
   return [
-    `🔔 <b>${escapeHtml(title)}</b>`,
+    `🔔 <b>${escapeTelegramHtml(title)}</b>`,
     '━━━━━━━━━━━━━━━━━━━',
-    `👤 <b>الاسم:</b> ${escapeHtml(studentName)}`,
-    ...(username ? [`🔑 <b>اسم المستخدم:</b> ${escapeHtml(username)}`] : []),
-    `🆔 <b>الرقم الجامعي:</b> ${escapeHtml(studentId)}`,
-    `🎓 <b>السنة الدراسية:</b> ${escapeHtml(studentYear)}`,
-    `📌 <b>الفئة:</b> ${escapeHtml(studentClass)}`,
+    `👤 <b>الاسم:</b> ${escapeTelegramHtml(studentName)}`,
+    ...(username ? [`🔑 <b>اسم المستخدم:</b> ${escapeTelegramHtml(username)}`] : []),
+    `🆔 <b>الرقم الجامعي:</b> ${escapeTelegramHtml(studentId)}`,
+    `🎓 <b>السنة الدراسية:</b> ${escapeTelegramHtml(studentYear)}`,
+    `📌 <b>الفئة:</b> ${escapeTelegramHtml(studentClass)}`,
     '━━━━━━━━━━━━━━━━━━━',
-    `📢 <b>الحالة:</b> ${escapeHtml(statusText)}`,
+    `📢 <b>الحالة:</b> ${escapeTelegramHtml(statusText)}`,
   ].join('\n');
 }
 
@@ -72,7 +81,7 @@ export async function sendTelegramNotification(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         chat_id: targetChatId,
-        text: message,
+        text: appendTelegramPortalFooter(message),
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       }),

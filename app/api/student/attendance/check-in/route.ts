@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import { createHash } from 'node:crypto';
+import { isAttendanceBusinessHours, isDegreeFourSupervisor } from '../../../../../lib/attendanceHours';
 import { createSupabaseAdminClient } from '../../../../../lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
 
 const clean = (value: unknown) => String(value ?? '').trim();
 const attendanceAudioFrequencies = [1000, 1500, 2000, 17000, 18000, 19000, 20000];
+const normalize = (value: unknown) => clean(value).replace(/\s+/g, '').toLocaleLowerCase();
 const normalizeGroup = (value: unknown) => clean(value).replace(/^فئة\s*/i, '');
 const normalizeYear = (value: unknown) => {
   const year = clean(value).replace(/\s+/g, '').toLocaleLowerCase();
@@ -79,6 +81,24 @@ export async function POST(request: Request) {
 
     if (!session) {
       return NextResponse.json({ success: false, error: 'attendance-challenge-expired-or-not-found' }, { status: 404 });
+    }
+
+    if (!isAttendanceBusinessHours()) {
+      const sessionSupervisor = clean(session['المشرف'] ?? session.supervisor);
+      const { data: supervisors, error: supervisorError } = await supabase.from('المشرفين').select('*');
+      if (supervisorError) {
+        console.error('ATTENDANCE_SUPERVISOR_LOOKUP_FAILED:', supervisorError.message);
+        return NextResponse.json({ success: false, error: 'attendance-supervisor-lookup-failed' }, { status: 500 });
+      }
+      const supervisor = (supervisors ?? []).find((row) => {
+        const record = row as Record<string, unknown>;
+        const username = record['اسم المستخدم'] ?? record.username ?? record['اسم_المستخدم'] ?? record.user_name;
+        return normalize(username) === normalize(sessionSupervisor);
+      }) as Record<string, unknown> | undefined;
+      const degree = normalize(supervisor?.['الدرجة'] ?? supervisor?.degree ?? supervisor?.rank ?? supervisor?.role ?? supervisor?.level);
+      if (supervisor && isDegreeFourSupervisor(degree)) {
+        return NextResponse.json({ success: false, error: 'attendance-outside-supervisor-hours' }, { status: 403 });
+      }
     }
 
     const course = clean(session['المادة'] ?? session.course);

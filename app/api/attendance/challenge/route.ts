@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { isAttendanceBusinessHours, isDegreeFourSupervisor } from '../../../../lib/attendanceHours';
 import { createSupabaseAdminClient } from '../../../../lib/supabaseAdmin';
 
 export const dynamic = 'force-dynamic';
@@ -50,6 +51,21 @@ export async function POST(request: Request) {
     }
     if (normalize(session['المشرف'] ?? session.supervisor) !== normalize(username)) {
       return NextResponse.json({ success: false, error: 'attendance-challenge-supervisor-invalid' }, { status: 403 });
+    }
+    if (!isAttendanceBusinessHours()) {
+      const { data: supervisors, error: supervisorError } = await supabase.from('المشرفين').select('*');
+      if (supervisorError) {
+        console.error('ATTENDANCE_CHALLENGE_SUPERVISOR_LOOKUP_FAILED:', supervisorError.message);
+        return NextResponse.json({ success: false, error: 'attendance-supervisor-lookup-failed' }, { status: 500 });
+      }
+      const supervisor = (supervisors ?? []).find((row) => {
+        const record = row as Record<string, unknown>;
+        return normalize(record['اسم المستخدم'] ?? record.username ?? record['اسم_المستخدم'] ?? record.user_name) === normalize(username);
+      }) as Record<string, unknown> | undefined;
+      const degree = normalize(supervisor?.['الدرجة'] ?? supervisor?.degree ?? supervisor?.rank ?? supervisor?.role ?? supervisor?.level);
+      if (supervisor && isDegreeFourSupervisor(degree)) {
+        return NextResponse.json({ success: false, error: 'attendance-outside-supervisor-hours' }, { status: 403 });
+      }
     }
 
     const expiresAt = new Date(Date.now() + 90_000).toISOString();

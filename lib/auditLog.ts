@@ -1,6 +1,6 @@
 const deviceIdStorageKey = 'udti-device-id';
 
-type AuditUserType = 'student' | 'teacher' | 'supervisor' | 'system';
+type AuditUserType = 'student' | 'teacher' | 'supervisor' | 'support_supervisor' | 'system';
 
 type AuditDetails = Record<string, unknown>;
 
@@ -25,9 +25,24 @@ export const writeAuditLog = (input: {
 }) => {
   if (typeof window === 'undefined') return;
 
+  let userType = input.userType;
+  if (userType === 'supervisor') {
+    const storedSupervisor = window.localStorage.getItem('udti-supervisor-session');
+    if (storedSupervisor) {
+      try {
+        const session = JSON.parse(storedSupervisor) as { degree?: unknown; accountType?: unknown };
+        if (String(session.degree ?? '') === '4' || session.accountType === 'support_student') {
+          userType = 'support_supervisor';
+        }
+      } catch (error) {
+        console.error('[audit] supervisor session could not be read:', error);
+      }
+    }
+  }
+
   const payload = {
     action: input.action,
-    user_type: input.userType,
+    user_type: userType,
     user_id: input.userId === null || input.userId === undefined ? null : String(input.userId),
     username: input.username || null,
     full_name: input.fullName || input.username || null,

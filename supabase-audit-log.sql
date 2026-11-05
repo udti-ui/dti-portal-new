@@ -28,7 +28,7 @@ alter table public."سجلات النظام"
 
 alter table public."سجلات النظام"
   add constraint system_logs_user_type_check
-  check (user_type in ('student', 'teacher', 'supervisor', 'system'));
+  check (user_type in ('student', 'teacher', 'supervisor', 'support_supervisor', 'system'));
 
 create index if not exists system_logs_created_at_idx
   on public."سجلات النظام" (created_at desc);

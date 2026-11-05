@@ -7,9 +7,15 @@ import QRCode from 'qrcode';
 import { CheckCircle2, ScanLine, UserRound, X } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { writeAuditLog } from '../../lib/auditLog';
+import { isAttendanceBusinessHours } from '../../lib/attendanceHours';
 import { getClassAvailabilityOptions } from '../../lib/studentData';
 import { buildStudentTelegramMessage, sendTelegramNotification } from '../../lib/telegram';
 import SupervisorChatManagement from '../components/SupervisorChatManagement';
+import AnnouncementPanel from '../components/AnnouncementPanel';
+import CourseMaterialsPanel from '../components/CourseMaterialsPanel';
+import DegreeFourStudentManagement from '../components/DegreeFourStudentManagement';
+import SupportStaffManagement from '../components/SupportStaffManagement';
+import StudentIdChangeLockSettings from '../components/StudentIdChangeLockSettings';
 
 type StudentRow = {
   id?: number | string;
@@ -41,7 +47,7 @@ type StudentRow = {
 
 type AttendanceStatus = 'pending' | 'present' | 'absent';
 type AbsenceReason = 'غياب مبرر' | 'غياب غير مبرر';
-type SupervisorFeature = 'attendance' | 'admin' | 'supervisors' | 'logs' | 'students' | 'create_student' | 'profile' | 'teacher_accounts' | 'teacher_management' | 'class_schedule' | 'feedback' | 'chat';
+type SupervisorFeature = 'attendance' | 'admin' | 'supervisors' | 'logs' | 'students' | 'create_student' | 'profile' | 'teacher_accounts' | 'teacher_management' | 'class_schedule' | 'feedback' | 'chat' | 'chat_support' | 'announcements' | 'course_lectures' | 'degree4_students' | 'support_tickets';
 type StudentFeedback = {
   id: string;
   kind: 'complaint' | 'suggestion';
@@ -153,6 +159,7 @@ type StoredSupervisorSession = {
   degree: string;
   features: SupervisorFeature[];
   selectedFeature?: SupervisorFeature | null;
+  accountType?: 'supervisor' | 'support_student';
 };
 
 const normalizeText = (value: unknown) => {
@@ -164,6 +171,7 @@ const auditUserTypeLabels: Record<string, string> = {
   student: 'طالب',
   teacher: 'مدرس',
   supervisor: 'مشرف',
+  support_supervisor: 'الدعم الفني (مشرف درجة رابعة)',
   system: 'النظام',
 };
 
@@ -180,7 +188,31 @@ const auditActionLabels: Record<string, string> = {
   student_id_changed: 'تغيير الرقم الجامعي',
   student_tab_opened: 'فتح صفحة الطالب',
   student_created_by_supervisor: 'إنشاء حساب طالب',
+  student_created_by_degree4_supervisor: 'إنشاء حساب طالب - قسم الدعم',
   student_updated_by_supervisor: 'تعديل بيانات طالب',
+  student_updated_by_degree4_supervisor: 'تعديل حساب طالب - قسم الدعم',
+  degree4_student_search: 'بحث قسم الدعم عن طالب',
+  degree4_student_selected: 'فتح ملف طالب من البحث',
+  degree4_student_creation_opened: 'فتح نموذج إنشاء حساب طالب - قسم الدعم',
+  degree4_student_id_checked: 'التحقق من الرقم الجامعي - قسم الدعم',
+  degree4_available_classes_viewed: 'عرض الفئات المتاحة - قسم الدعم',
+  degree4_created_accounts_viewed: 'عرض حسابات أنشأها قسم الدعم',
+  degree4_created_student_opened: 'عرض بيانات حساب أنشأه قسم الدعم',
+  degree4_support_tickets_viewed: 'عرض تذاكر قسم الدعم',
+  supervisor_login_failed: 'محاولة تسجيل دخول مشرف غير ناجحة',
+  supervisor_button_clicked: 'ضغط زر في لوحة المشرف',
+  degree4_created_student_deleted: 'حذف حساب طالب - قسم الدعم',
+  degree4_student_update_requested: 'طلب تعديل بيانات طالب',
+  degree4_support_ticket_created: 'رفع تذكرة للإدارة العليا',
+  degree4_support_ticket_reviewed: 'مراجعة تذكرة قسم الدعم',
+  student_chat_support_login: 'تسجيل دخول موظف دعم الدردشة',
+  student_chat_support_login_failed: 'محاولة دخول دعم دردشة غير ناجحة',
+  student_chat_support_granted: 'منح صلاحية دعم الدردشة',
+  student_chat_support_revoked: 'سحب صلاحية دعم الدردشة',
+  student_chat_muted_24h: 'كتم طالب 24 ساعة في الدردشة',
+  student_chat_support_viewed: 'عرض موظف الدعم دردشة الطلاب',
+  student_chat_support_profile_viewed: 'عرض موظف الدعم بيانات طالب من الدردشة',
+  student_first_login_password_changed: 'تغيير كلمة المرور عند أول دخول',
   teacher_login: 'تسجيل دخول المدرس',
   teacher_logout: 'تسجيل خروج المدرس',
   teacher_alert_created: 'إضافة تنبيه لطالب',
@@ -217,6 +249,7 @@ const normalizeSupervisorDegree = (value: unknown) => {
   if (['1', '١', 'one', 'first', 'اولى', 'الأولى', '1st', 'moderator', 'مودرييتور', 'monitor', 'مراقب', 'المودرييتور'].some((item) => normalized.includes(item))) return '1';
   if (['2', '٢', 'two', 'second', 'ثانية', 'الثانية', '2nd', 'supervisor', 'super', 'سوبر', 'سوبرفايزور', 'supervisor2', 'level2', 'فايزور', 'fayzor', 'fayzur', 'faizur'].some((item) => normalized.includes(item))) return '2';
   if (['3', '٣', 'three', 'third', 'ثالثة', 'الثالثة', '3rd', 'level3', 'supervisor3', 'senior', 'قائد', 'رئيس', 'adminlevel'].some((item) => normalized.includes(item))) return '3';
+  if (['4', '٤', 'four', 'fourth', 'رابعة', 'الرابعة', '4th', 'level4', 'supervisor4'].some((item) => normalized.includes(item))) return '4';
 
   if (/^\d$/.test(normalized)) return normalized;
   return normalized || text;
@@ -235,17 +268,17 @@ const resolveSupervisorDegreeFromRow = (row: Record<string, unknown>) => {
 
   for (const candidate of directCandidates) {
     const normalized = normalizeSupervisorDegree(candidate);
-    if (['1', '2', '3'].includes(normalized)) return normalized;
+    if (['1', '2', '3', '4'].includes(normalized)) return normalized;
   }
 
   for (const [key, value] of Object.entries(row)) {
     const lowerKey = String(key).toLowerCase();
-    if (!/(درجة|degree|rank|level|role)/i.test(lowerKey) && !/(1|2|3|اولى|ثانية|ثالثة|moderator|supervisor|فايزور|سوبر|مراقب)/i.test(String(value ?? ''))) {
+    if (!/(درجة|degree|rank|level|role)/i.test(lowerKey) && !/(1|2|3|4|اولى|ثانية|ثالثة|رابعة|moderator|supervisor|فايزور|سوبر|مراقب)/i.test(String(value ?? ''))) {
       continue;
     }
 
     const parsed = normalizeSupervisorDegree(value);
-    if (['1', '2', '3'].includes(parsed)) return parsed;
+    if (['1', '2', '3', '4'].includes(parsed)) return parsed;
   }
 
   return '3';
@@ -253,9 +286,11 @@ const resolveSupervisorDegreeFromRow = (row: Record<string, unknown>) => {
 
 const getSupervisorDegreeLabel = (degree: string) => {
   const normalized = normalizeSupervisorDegree(degree);
+  if (normalizeText(degree).toLowerCase() === 'support') return 'قسم الدعم';
   if (normalized === '1' || ['moderator', 'مودرييتور', 'monitor', 'مراقب'].includes(normalizeText(degree).replace(/\s+/g, '').toLowerCase())) return 'مودرييتور';
   if (normalized === '2' || ['supervisor', 'super', 'سوبر', 'سوبرفايزور'].includes(normalizeText(degree).replace(/\s+/g, '').toLowerCase())) return 'سوبر فيزور';
   if (normalized === '3' || ['fayzor', 'fayzur', 'فايزور', 'faizur'].includes(normalizeText(degree).replace(/\s+/g, '').toLowerCase())) return 'فايزور';
+  if (normalized === '4') return 'مشرف درجة رابعة';
   return 'مشرف';
 };
 
@@ -272,7 +307,7 @@ const getSupervisorFeatures = (degree: string): SupervisorFeature[] => {
   const lowerDegree = normalizeText(degree).replace(/\s+/g, '').toLowerCase();
 
   if (normalizedDegree === '1' || ['moderator', 'مودرييتور', 'monitor', 'مراقب', 'المودرييتور'].includes(lowerDegree)) {
-    return ['admin', 'attendance', 'supervisors', 'logs', 'students', 'create_student', 'profile', 'teacher_accounts', 'teacher_management', 'class_schedule', 'feedback', 'chat'];
+    return ['admin', 'attendance', 'supervisors', 'logs', 'students', 'create_student', 'profile', 'teacher_accounts', 'teacher_management', 'class_schedule', 'feedback', 'chat', 'chat_support', 'announcements', 'course_lectures', 'support_tickets'];
   }
 
   if (normalizedDegree === '2' || ['supervisor', 'سوبر', 'سوبرفايزور', 'super', 'supervisor2', 'fayzor', 'fayzur', 'فايزور', 'faizur'].includes(lowerDegree)) {
@@ -282,6 +317,8 @@ const getSupervisorFeatures = (degree: string): SupervisorFeature[] => {
   if (['3'].includes(normalizedDegree)) {
     return ['attendance', 'profile'];
   }
+
+  if (normalizedDegree === '4') return ['attendance', 'profile', 'degree4_students'];
 
   return [];
 };
@@ -868,8 +905,8 @@ const findSupervisorLogin = async (username: string, password: string) => {
     const rawPassword = row['كلمة المرور'] ?? row.password ?? row['password'] ?? row['كلمة_المرور'] ?? row['pass'] ?? '';
     const rawDegree = row['الدرجة'] ?? row.degree ?? row['degree'] ?? row['درجه'] ?? row['rank'] ?? '';
     const degreeValue = getSupervisorDegree(row);
-    const isAllowedDegree = ['1', '2', '3'].includes(degreeValue)
-      || ['moderator', 'مودرييتور', 'monitor', 'مراقب', 'supervisor', 'سوبر', 'فايزور', 'faizur', 'fayzor'].includes(normalizeText(rawDegree).replace(/\s+/g, '').toLowerCase());
+    const isAllowedDegree = ['1', '2', '3', '4'].includes(degreeValue)
+      || ['moderator', 'مودرييتور', 'monitor', 'مراقب', 'supervisor', 'سوبر', 'فايزور', 'faizur', 'fayzor', 'supervisor4'].includes(normalizeText(rawDegree).replace(/\s+/g, '').toLowerCase());
 
     if (normalizeSupervisorValue(rawPassword) !== normalizedInputPassword) return { match: false, reason: 'password', row, tableName };
     if (!isAllowedDegree) return { match: false, reason: 'degree', row, expectedDegree: rawDegree, tableName };
@@ -1159,6 +1196,7 @@ export default function AttendancePage() {
   const [messageComposerText, setMessageComposerText] = useState('');
   const [messageComposerSending, setMessageComposerSending] = useState(false);
   const [sessionActive, setSessionActive] = useState(false);
+  const [attendanceWindowOpen, setAttendanceWindowOpen] = useState(isAttendanceBusinessHours());
   const [students, setStudents] = useState<StudentRow[]>([]);
   const [selectedAttendancePhoto, setSelectedAttendancePhoto] = useState<{ url: string; name: string } | null>(null);
   const [attendanceData, setAttendanceData] = useState<Record<string, AttendanceEntry>>({});
@@ -1305,20 +1343,49 @@ export default function AttendancePage() {
     if (!activeUsername || typeof window === 'undefined') return;
 
     try {
-      const { data, error } = await supabase.from('المشرفين').select('*');
-      if (error) throw error;
+      const password = window.localStorage.getItem(rememberedSupervisorPasswordKey) || supervisorPassword;
+      const response = password ? await fetch('/api/student-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ action: 'validate-dashboard-session', username: activeUsername, password }),
+      }) : null;
+      const result = response?.ok ? await response.json() as {
+        success?: boolean;
+        accountType?: 'supervisor' | 'support_student';
+        degree?: string;
+      } : null;
+      if (!result?.success || !result.accountType) {
+        window.localStorage.removeItem(supervisorSessionStorageKey);
+        setSupervisorLoggedIn(false);
+        setSupervisorFeatures([]);
+        setSupervisorDegree('');
+        setSelectedFeature(null);
+        setNotice('انتهت صلاحية الجلسة أو لم تعد للحساب صلاحية لوحة التحكم. سجّل الدخول مجددًا.');
+        return;
+      }
 
-      const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
-      const match = rows.find((row) => normalizeSupervisorValue(row['اسم المستخدم'] ?? row.username ?? row['username'] ?? row['اسم_المستخدم'] ?? row['user_name']) === normalizeSupervisorValue(activeUsername));
-      if (!match) return;
-
-      const liveDegree = getSupervisorDegree(match) || '3';
+      const isSupportStudent = result.accountType === 'support_student';
+      const liveDegree = isSupportStudent ? '4' : getSupervisorDegree({ 'الدرجة': result.degree }) || '3';
       const liveFeatures = getSupervisorFeatures(liveDegree);
+      if (!liveFeatures.length) {
+        window.localStorage.removeItem(supervisorSessionStorageKey);
+        setSupervisorLoggedIn(false);
+        setSupervisorFeatures([]);
+        setSupervisorDegree('');
+        setSelectedFeature(null);
+        setNotice('لا توجد صلاحيات مفعلة لهذا الحساب.');
+        return;
+      }
+      setSupervisorLoggedIn(true);
+      setSupervisorUsername(activeUsername);
+      setSupervisorPassword(password);
       setSupervisorDegree(liveDegree);
       setSupervisorFeatures(liveFeatures);
 
       const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as Partial<StoredSupervisorSession>;
-      const allowedSelectedFeature = stored.selectedFeature && liveFeatures.includes(stored.selectedFeature) ? stored.selectedFeature : null;
+      const allowedSelectedFeature = stored.selectedFeature && liveFeatures.includes(stored.selectedFeature)
+        ? stored.selectedFeature : null;
       setSelectedFeature(allowedSelectedFeature);
 
       window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({
@@ -1326,9 +1393,17 @@ export default function AttendancePage() {
         degree: liveDegree,
         features: liveFeatures,
         selectedFeature: allowedSelectedFeature,
+        accountType: isSupportStudent ? 'support_student' : 'supervisor',
       } satisfies StoredSupervisorSession));
-    } catch {
-      // Ignore background sync failures; the session remains usable and refreshes on next login.
+    } catch (error) {
+      console.error('Supervisor session validation failed:', error);
+      window.localStorage.removeItem(supervisorSessionStorageKey);
+      setSupervisorLoggedIn(false);
+      setSupervisorFeatures([]);
+      setSupervisorDegree('');
+      setSelectedFeature(null);
+      setSupervisorPassword('');
+      setNotice('تعذر التحقق من الجلسة. سجّل الدخول مجددًا.');
     }
   };
 
@@ -1352,23 +1427,41 @@ export default function AttendancePage() {
   };
 
   useEffect(() => {
-    try {
-      const storedSupervisor = window.localStorage.getItem(supervisorSessionStorageKey);
-      if (!storedSupervisor) return;
-      const session = JSON.parse(storedSupervisor) as StoredSupervisorSession;
-      if (session?.username && Array.isArray(session.features)) {
+    let cancelled = false;
+    const restoreSession = async () => {
+      try {
+        const storedSupervisor = window.localStorage.getItem(supervisorSessionStorageKey);
+        if (!storedSupervisor) return;
+        const session = JSON.parse(storedSupervisor) as StoredSupervisorSession;
+        const rememberedUsername = window.localStorage.getItem(rememberedSupervisorUsernameKey) ?? '';
+        const rememberedPassword = window.localStorage.getItem(rememberedSupervisorPasswordKey) ?? '';
+        if (!session?.username || rememberedUsername !== session.username || !rememberedPassword) {
+          window.localStorage.removeItem(supervisorSessionStorageKey);
+          setNotice('يرجى تسجيل الدخول مجددًا للتحقق من صلاحيات الحساب.');
+          return;
+        }
         setSupervisorUsername(session.username);
-        setSupervisorDegree(session.degree || '');
-        setSupervisorFeatures(session.features);
-        setSelectedFeature(session.selectedFeature ?? null);
-        setSupervisorLoggedIn(true);
-        setNotice('تمت استعادة جلسة المشرف. اختر الوظيفة للمتابعة.');
+        setSupervisorPassword(rememberedPassword);
+        setNotice('جارٍ التحقق من صلاحيات الجلسة...');
+        await refreshSupervisorSessionFromDatabase(session.username, session.username);
+      } catch (error) {
+        console.error('Supervisor session restore failed:', error);
+        window.localStorage.removeItem(supervisorSessionStorageKey);
+        setSupervisorLoggedIn(false);
+        setNotice('تعذر استعادة الجلسة. سجّل الدخول مجددًا.');
+      } finally {
+        if (!cancelled) setSupervisorSessionReady(true);
       }
-    } catch {
-      window.localStorage.removeItem(supervisorSessionStorageKey);
-    } finally {
-      setSupervisorSessionReady(true);
-    }
+    };
+    void restoreSession();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const refreshAttendanceWindow = () => setAttendanceWindowOpen(isAttendanceBusinessHours());
+    refreshAttendanceWindow();
+    const timer = window.setInterval(refreshAttendanceWindow, 30_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -2573,7 +2666,7 @@ export default function AttendancePage() {
     if (supervisorLoggedIn && supervisorUsername) {
       void refreshSupervisorSessionFromDatabase(supervisorUsername);
     }
-  }, [supervisorLoggedIn, supervisorUsername]);
+  }, [supervisorLoggedIn, supervisorUsername, supervisorDegree]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -2584,7 +2677,7 @@ export default function AttendancePage() {
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [supervisorLoggedIn, supervisorUsername]);
+  }, [supervisorLoggedIn, supervisorUsername, supervisorDegree]);
 
   useEffect(() => {
     if (supervisorLoggedIn && selectedFeature === 'students') {
@@ -2625,7 +2718,49 @@ export default function AttendancePage() {
     try {
       const supervisor = await findSupervisorLogin(username, password);
       if (!supervisor || !('match' in supervisor) || supervisor.match !== true) {
+        const supportResponse = await fetch('/api/student-chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ action: 'support-login', studentId: username, password }),
+        });
+        const supportResult = await supportResponse.json() as {
+          success?: boolean;
+          studentName?: string;
+        };
+        if (supportResponse.ok && supportResult.success) {
+          const features = getSupervisorFeatures('4');
+          setSupervisorUsername(username);
+          setSupervisorPassword(password);
+          setSupervisorDegree('4');
+          setSupervisorFeatures(features);
+          setSelectedFeature(null);
+          setSupervisorLoggedIn(true);
+          if (rememberSupervisorCredentials) {
+            window.localStorage.setItem(rememberedSupervisorUsernameKey, username);
+            window.localStorage.setItem(rememberedSupervisorPasswordKey, password);
+          } else {
+            window.localStorage.removeItem(rememberedSupervisorUsernameKey);
+            window.localStorage.removeItem(rememberedSupervisorPasswordKey);
+          }
+          window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({
+            username,
+            degree: '4',
+            features,
+            selectedFeature: null,
+            accountType: 'support_student',
+          } satisfies StoredSupervisorSession));
+          setNotice(`مرحبًا ${supportResult.studentName ?? ''}. تم تسجيل الدخول إلى لوحة التحكم بصلاحيات الدرجة الرابعة.`);
+          return;
+        }
+
         const failedReason = supervisor && 'reason' in supervisor ? supervisor.reason : 'username';
+        writeAuditLog({
+          action: 'supervisor_login_failed',
+          userType: 'supervisor',
+          username,
+          details: { reason: failedReason, portal: 'supervisor_dashboard' },
+        });
 
         if (failedReason === 'username' || failedReason === 'password') {
           setNotice('اسم المستخدم أو كلمة المرور غير صحيحة');
@@ -2660,18 +2795,30 @@ export default function AttendancePage() {
         degree: getSupervisorDegree(row),
         features,
         selectedFeature: null,
+        accountType: 'supervisor',
       } satisfies StoredSupervisorSession));
       writeAuditLog({
         action: 'supervisor_login',
         userType: 'supervisor',
         username,
-        details: { degree: getSupervisorDegree(row), features },
+        details: {
+          degree: getSupervisorDegree(row),
+          features,
+          loginMethod: 'username_password',
+          portal: 'supervisor_dashboard',
+        },
       });
       setSelectedFeature(null);
       setNotice('تم تسجيل الدخول بأمان. اختر الوظيفة المطلوبة للمتابعة.');
     } catch (error) {
       const message = getSupabaseErrorText(error);
       console.error('Supervisor auth error:', message);
+      writeAuditLog({
+        action: 'supervisor_login_failed',
+        userType: 'supervisor',
+        username,
+        details: { reason: 'authentication_service_error', portal: 'supervisor_dashboard' },
+      });
       setNotice(`حدث خطأ في تسجيل دخول المشرف: ${message}`);
     } finally {
       setLoading(false);
@@ -2689,6 +2836,10 @@ export default function AttendancePage() {
 
   const startSession = async () => {
     if (loading || sessionActive) return;
+    if (supervisorDegree === '4' && !isAttendanceBusinessHours()) {
+      setNotice('تسجيل الحضور لمشرفي الدرجة الرابعة متاح من الأحد إلى الخميس، من 08:00 حتى 14:00 بتوقيت دمشق فقط.');
+      return;
+    }
     if (!selectedCourse || !selectedClass) {
       setNotice('يرجى اختيار المادة والفئة أولاً');
       return;
@@ -2765,6 +2916,10 @@ export default function AttendancePage() {
   };
 
   const updateStudentStatus = async (student: StudentRow, status: AttendanceStatus, absenceReason?: AbsenceReason) => {
+    if (supervisorDegree === '4' && !isAttendanceBusinessHours()) {
+      setNotice('انتهت ساعات تسجيل الحضور لمشرفي الدرجة الرابعة. لم يتم تسجيل أي تغيير.');
+      return;
+    }
     const studentId = getStudentIdentifier(student);
     if (!studentId) return;
 
@@ -3156,6 +3311,10 @@ export default function AttendancePage() {
 
   const saveSession = async () => {
     if (saveInProgressRef.current || loading || pendingAttendanceFlushInProgress) return;
+    if (supervisorDegree === '4' && !isAttendanceBusinessHours()) {
+      setNotice('حفظ الحضور لمشرفي الدرجة الرابعة متاح فقط خلال ساعات الدوام الرسمية.');
+      return;
+    }
     const pendingStudents = students.filter((student) => {
       const studentId = getStudentIdentifier(student);
       return attendanceData[studentId]?.status !== 'present' && attendanceData[studentId]?.status !== 'absent';
@@ -3340,7 +3499,7 @@ export default function AttendancePage() {
                 margin: '0 8px',
               }}
             >
-              <span>المشرف: {supervisorUsername || 'غير محدد'}</span>
+              <span>{supervisorDegree === 'support' ? 'موظف الدعم:' : 'المشرف:'} {supervisorUsername || 'غير محدد'}</span>
               <span>•</span>
               <span>الدرجة: {getSupervisorDegreeLabel(supervisorDegree) || 'مشرف'}</span>
               <span>•</span>
@@ -3354,7 +3513,16 @@ export default function AttendancePage() {
               onClick={() => {
                 attendanceToneCleanupRef.current?.();
                 if (activeSession) void closeAttendanceSession(activeSession.id);
-                writeAuditLog({ action: 'supervisor_logout', userType: 'supervisor', username: supervisorUsername });
+                writeAuditLog({
+                  action: 'supervisor_logout',
+                  userType: 'supervisor',
+                  username: supervisorUsername,
+                  details: {
+                    degree: supervisorDegree,
+                    lastFeature: selectedFeature,
+                    activeAttendanceSession: Boolean(activeSession),
+                  },
+                });
                 window.localStorage.removeItem(supervisorSessionStorageKey);
                 setSupervisorLoggedIn(false);
                 setSupervisorUsername('');
@@ -3412,14 +3580,14 @@ export default function AttendancePage() {
 
             <form onSubmit={handleSupervisorLogin}>
               <div className="field-group">
-                <label htmlFor="supervisor-user">اسم المستخدم</label>
+                <label htmlFor="supervisor-user">اسم المستخدم أو الرقم الجامعي</label>
                 <input
                   id="supervisor-user"
                   type="text"
                   autoComplete="username"
                   value={supervisorUsername}
                   onChange={(event) => setSupervisorUsername(event.target.value)}
-                  placeholder="أدخل اسم المستخدم"
+                  placeholder="أدخل اسم المستخدم أو الرقم الجامعي"
                   required
                 />
               </div>
@@ -3455,7 +3623,7 @@ export default function AttendancePage() {
               </label>
 
               <button className="action-button primary" type="submit" disabled={loading}>
-                {loading ? 'جاري التحقق...' : 'دخول المشرف'}
+                {loading ? 'جاري التحقق...' : 'دخول المشرف / قسم الدعم'}
               </button>
             </form>
 
@@ -3475,6 +3643,30 @@ export default function AttendancePage() {
             </div>
 
             <div className="supervisor-feature-grid">
+              {supervisorFeatures.includes('announcements') && (
+                <button type="button" className="supervisor-feature-card" onClick={() => {
+                  setSelectedFeature('announcements');
+                  const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+                  window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'announcements' }));
+                  writeAuditLog({ action: 'feature_opened', userType: 'supervisor', username: supervisorUsername, details: { feature: 'announcements' } });
+                }}>
+                  <span className="feature-icon" aria-hidden="true">📢</span>
+                  <span><strong>الإعلانات</strong><small>نشر إعلان للطلاب بحسب السنة والمادة</small></span>
+                  <span className="feature-arrow" aria-hidden="true">←</span>
+                </button>
+              )}
+              {supervisorFeatures.includes('course_lectures') && (
+                <button type="button" className="supervisor-feature-card" onClick={() => {
+                  setSelectedFeature('course_lectures');
+                  const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+                  window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'course_lectures' }));
+                  writeAuditLog({ action: 'feature_opened', userType: 'supervisor', username: supervisorUsername, details: { feature: 'course_lectures' } });
+                }}>
+                  <span className="feature-icon" aria-hidden="true">📚</span>
+                  <span><strong>المقررات والمحاضرات</strong><small>رفع محاضرات المواد ومراجعتها وحذفها</small></span>
+                  <span className="feature-arrow" aria-hidden="true">←</span>
+                </button>
+              )}
               {supervisorFeatures.includes('feedback') && (
                 <button type="button" className="supervisor-feature-card" onClick={() => {
                   setSelectedFeature('feedback');
@@ -3506,8 +3698,20 @@ export default function AttendancePage() {
                   <span className="feature-icon" aria-hidden="true">☷</span>
                   <span>
                     <strong>دردشة الطلاب</strong>
-                    <small>فتح الدردشة أو إغلاقها وإدارة حظر الطلاب</small>
+                    <small>{supervisorDegree === 'support' ? 'متابعة دردشة السنتين وكتم الطلاب مع السبب' : 'فتح الدردشة أو إغلاقها وإدارة حظر الطلاب'}</small>
                   </span>
+                  <span className="feature-arrow" aria-hidden="true">←</span>
+                </button>
+              )}
+              {supervisorFeatures.includes('chat_support') && (
+                <button type="button" className="supervisor-feature-card" onClick={() => {
+                  setSelectedFeature('chat_support');
+                  const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+                  window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'chat_support' }));
+                  writeAuditLog({ action: 'feature_opened', userType: 'supervisor', username: supervisorUsername, details: { feature: 'chat_support' } });
+                }}>
+                  <span className="feature-icon" aria-hidden="true">♙</span>
+                  <span><strong>صلاحيات قسم دعم الدردشة</strong><small>منح أو سحب الصلاحية لحساب طالب قائم</small></span>
                   <span className="feature-arrow" aria-hidden="true">←</span>
                 </button>
               )}
@@ -3515,7 +3719,12 @@ export default function AttendancePage() {
                 <button
                   type="button"
                   className="supervisor-feature-card"
+                  disabled={supervisorDegree === '4' && !attendanceWindowOpen}
                   onClick={() => {
+                    if (supervisorDegree === '4' && !isAttendanceBusinessHours()) {
+                      setNotice('تسجيل الحضور متاح من الأحد إلى الخميس، من 08:00 حتى 14:00 بتوقيت دمشق فقط.');
+                      return;
+                    }
                     setSelectedFeature('attendance');
                     const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
                     window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'attendance' }));
@@ -3526,8 +3735,33 @@ export default function AttendancePage() {
                   <span className="feature-icon" aria-hidden="true">✓</span>
                   <span>
                     <strong>الحضور والغياب</strong>
-                    <small>إدارة جلسات الحضور وتسجيل حالة الطلاب</small>
+                    <small>{supervisorDegree === '4' ? 'للدرجة الرابعة: الأحد إلى الخميس، 08:00 - 14:00' : 'إدارة جلسات الحضور وتسجيل حالة الطلاب'}</small>
                   </span>
+                  <span className="feature-arrow" aria-hidden="true">←</span>
+                </button>
+              )}
+              {supervisorFeatures.includes('degree4_students') && (
+                <button type="button" className="supervisor-feature-card" onClick={() => {
+                  setSelectedFeature('degree4_students');
+                  const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+                  window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'degree4_students' }));
+                  writeAuditLog({ action: 'feature_opened', userType: 'supervisor', username: supervisorUsername, details: { feature: 'degree4_students' } });
+                  setNotice('تم فتح إدارة حسابات الطلاب لمشرف الدرجة الرابعة.');
+                }}>
+                  <span className="feature-icon" aria-hidden="true">＋</span>
+                  <span><strong>حسابات الطلاب والدعم</strong><small>إنشاء وبحث ومتابعة الحسابات والتذاكر</small></span>
+                  <span className="feature-arrow" aria-hidden="true">←</span>
+                </button>
+              )}
+              {supervisorFeatures.includes('support_tickets') && (
+                <button type="button" className="supervisor-feature-card" onClick={() => {
+                  setSelectedFeature('support_tickets');
+                  const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+                  window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: 'support_tickets' }));
+                  writeAuditLog({ action: 'feature_opened', userType: 'supervisor', username: supervisorUsername, details: { feature: 'support_tickets' } });
+                }}>
+                  <span className="feature-icon" aria-hidden="true">✉</span>
+                  <span><strong>تذاكر الدعم</strong><small>مراجعة طلبات مشرفي الدرجة الرابعة</small></span>
                   <span className="feature-arrow" aria-hidden="true">←</span>
                 </button>
               )}
@@ -3662,6 +3896,32 @@ export default function AttendancePage() {
           </section>
         )}
 
+        {supervisorLoggedIn && supervisorFeatures.includes('announcements') && selectedFeature === 'announcements' && (
+          <AnnouncementPanel
+            mode="supervisor"
+            supervisorUsername={supervisorUsername}
+            supervisorPassword={supervisorPassword}
+            onBack={() => {
+              setSelectedFeature(null);
+              const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+              window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: null }));
+            }}
+          />
+        )}
+
+        {supervisorLoggedIn && supervisorFeatures.includes('course_lectures') && selectedFeature === 'course_lectures' && (
+          <CourseMaterialsPanel
+            mode="supervisor"
+            supervisorUsername={supervisorUsername}
+            supervisorPassword={supervisorPassword}
+            onBack={() => {
+              setSelectedFeature(null);
+              const stored = JSON.parse(window.localStorage.getItem(supervisorSessionStorageKey) || '{}') as StoredSupervisorSession;
+              window.localStorage.setItem(supervisorSessionStorageKey, JSON.stringify({ ...stored, selectedFeature: null }));
+            }}
+          />
+        )}
+
         {supervisorLoggedIn && supervisorFeatures.includes('feedback') && selectedFeature === 'feedback' && (
           <section className="admin-dashboard-panel">
             <div className="admin-dashboard-heading">
@@ -3706,6 +3966,13 @@ export default function AttendancePage() {
 
         {supervisorLoggedIn && supervisorFeatures.includes('chat') && selectedFeature === 'chat' && (
           <SupervisorChatManagement
+            supervisorUsername={supervisorUsername}
+            supervisorPassword={supervisorPassword}
+            supportStudentId={supervisorDegree === 'support' ? supervisorUsername : undefined}
+          />
+        )}
+        {supervisorLoggedIn && supervisorDegree === '1' && selectedFeature === 'chat_support' && (
+          <SupportStaffManagement
             supervisorUsername={supervisorUsername}
             supervisorPassword={supervisorPassword}
           />
@@ -4212,6 +4479,22 @@ export default function AttendancePage() {
           </section>
         )}
 
+        {supervisorLoggedIn && selectedFeature === 'degree4_students' && supervisorDegree === '4' && (
+          <DegreeFourStudentManagement
+            supervisorUsername={supervisorUsername}
+            supervisorPassword={supervisorPassword}
+            supervisorDegree={supervisorDegree}
+          />
+        )}
+
+        {supervisorLoggedIn && selectedFeature === 'support_tickets' && supervisorDegree === '1' && (
+          <DegreeFourStudentManagement
+            supervisorUsername={supervisorUsername}
+            supervisorPassword={supervisorPassword}
+            supervisorDegree={supervisorDegree}
+          />
+        )}
+
         {supervisorLoggedIn && selectedFeature === 'students' && (
           <section className="student-management-panel">
             <div className="student-management-header">
@@ -4224,6 +4507,13 @@ export default function AttendancePage() {
                 {adminLoading ? 'جاري التحديث...' : 'تحديث الطلاب'}
               </button>
             </div>
+
+            {normalizeSupervisorDegree(supervisorDegree) === '1' && (
+              <StudentIdChangeLockSettings
+                supervisorUsername={supervisorUsername}
+                supervisorPassword={supervisorPassword}
+              />
+            )}
 
             <div className="student-management-toolbar">
               <div className="field-group">
@@ -4390,7 +4680,7 @@ export default function AttendancePage() {
             <form className="admin-supervisor-form" onSubmit={handleSupervisorFormSubmit}>
               <input value={supervisorForm.username} onChange={(event) => setSupervisorForm({ ...supervisorForm, username: event.target.value })} placeholder="اسم المستخدم" required />
               <input value={supervisorForm.password} onChange={(event) => setSupervisorForm({ ...supervisorForm, password: event.target.value })} placeholder={editingSupervisorId ? 'كلمة مرور جديدة (اختياري)' : 'كلمة المرور'} type="password" required={!editingSupervisorId} />
-              <select value={supervisorForm.degree} onChange={(event) => setSupervisorForm({ ...supervisorForm, degree: event.target.value })}><option value="1">الدرجة 1</option><option value="2">الدرجة 2</option><option value="3">الدرجة 3</option></select>
+              <select value={supervisorForm.degree} onChange={(event) => setSupervisorForm({ ...supervisorForm, degree: event.target.value })}><option value="1">الدرجة 1</option><option value="2">الدرجة 2</option><option value="3">الدرجة 3</option><option value="4">الدرجة 4 - قسم الدعم</option></select>
               <button type="submit" className="action-button primary">{editingSupervisorId ? 'حفظ التعديل' : 'إضافة مشرف'}</button>
               {editingSupervisorId && <button type="button" className="action-button warning" onClick={() => { setEditingSupervisorId(''); setSupervisorForm({ username: '', password: '', degree: '3' }); }}>إلغاء</button>}
             </form>
@@ -4422,6 +4712,7 @@ export default function AttendancePage() {
                   <option value="student">الطلاب</option>
                   <option value="teacher">المدرسون</option>
                   <option value="supervisor">المشرفون</option>
+                  <option value="support_supervisor">قسم الدعم - الدرجة الرابعة</option>
                 </select>
               </label>
               <label>
@@ -4497,7 +4788,14 @@ export default function AttendancePage() {
           </section>
         )}
 
-        {supervisorLoggedIn && selectedFeature === 'attendance' && (
+        {supervisorLoggedIn && selectedFeature === 'attendance' && supervisorDegree === '4' && !attendanceWindowOpen && (
+          <section className="panel" role="status">
+            <div className="panel-header"><span>تسجيل الحضور مغلق حالياً</span></div>
+            <p>هذه الوظيفة لمشرفي الدرجة الرابعة متاحة من الأحد إلى الخميس، بين الساعة 08:00 والساعة 14:00 بتوقيت دمشق. لا يمكن تسجيل أو حفظ الحضور خارج هذه الساعات.</p>
+          </section>
+        )}
+
+        {supervisorLoggedIn && selectedFeature === 'attendance' && (supervisorDegree !== '4' || attendanceWindowOpen) && (
           <>
             <header className="attendance-header">
           <div className="attendance-header-inner">
@@ -4596,7 +4894,7 @@ export default function AttendancePage() {
 
         {supervisorLoggedIn && loading && <div className="loading-box">جاري تحميل البيانات...</div>}
 
-        {supervisorLoggedIn && sessionActive && (
+        {supervisorLoggedIn && sessionActive && (supervisorDegree !== '4' || attendanceWindowOpen) && (
           <section className="panel">
             <div className="panel-header attendance-scanner-header">
               <span>جلسة الحضور النشطة</span>

@@ -1,9 +1,30 @@
 'use client';
 
-import Link from 'next/link';
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, BookOpen, CalendarDays, Download, LogOut, RefreshCw, Trash2, UserRound, Users, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  BellRing,
+  BookOpen,
+  CalendarDays,
+  ClipboardList,
+  Download,
+  GraduationCap,
+  LayoutDashboard,
+  LogOut,
+  Megaphone,
+  MessageCircle,
+  RefreshCw,
+  Settings,
+  Trash2,
+  UserRound,
+  Users,
+  X,
+} from 'lucide-react';
 import { writeAuditLog } from '../../lib/auditLog';
+import AnnouncementPanel from '../components/AnnouncementPanel';
+import CourseMaterialsPanel from '../components/CourseMaterialsPanel';
+import TeacherGradesPanel from '../components/TeacherGradesPanel';
+import TeacherInquiriesPanel from '../components/TeacherInquiriesPanel';
 
 const rememberedTeacherUsernameKey = 'udti-remembered-teacher-username';
 const rememberedTeacherPasswordKey = 'udti-remembered-teacher-password';
@@ -12,6 +33,7 @@ type Teacher = {
   id: string;
   name: string;
   subjects: string[];
+  telegramChatId?: string;
 };
 
 type Student = {
@@ -40,6 +62,8 @@ type TeacherAlert = {
   message: string;
   created_at: string;
 };
+
+type TeacherTab = 'students' | 'attendance' | 'alerts' | 'grades' | 'announcements' | 'courses' | 'inquiries';
 
 const getAttendanceStatus = (status: string) => {
   const value = status.trim().toLowerCase();
@@ -77,11 +101,13 @@ export default function TeacherPortalPage() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [alerts, setAlerts] = useState<TeacherAlert[]>([]);
   const [selectedSubject, setSelectedSubject] = useState('');
+  const [activeTab, setActiveTab] = useState<TeacherTab>('students');
   const [search, setSearch] = useState('');
   const [selectedClass, setSelectedClass] = useState('__all__');
   const [studentView, setStudentView] = useState<'cards' | 'table'>('cards');
   const [selectedStudentPhoto, setSelectedStudentPhoto] = useState<{ url: string; name: string } | null>(null);
   const [selectedStudentId, setSelectedStudentId] = useState('');
+  const [alertStudentSearch, setAlertStudentSearch] = useState('');
   const [alertMessage, setAlertMessage] = useState('');
   const alertMessageRef = useRef<HTMLTextAreaElement>(null);
   const [loading, setLoading] = useState(false);
@@ -90,6 +116,10 @@ export default function TeacherPortalPage() {
   const [deletingAlertId, setDeletingAlertId] = useState<number | null>(null);
   const [notice, setNotice] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
   const [welcomeMessage, setWelcomeMessage] = useState('');
+  const [showProfileSettings, setShowProfileSettings] = useState(false);
+  const [profileDraft, setProfileDraft] = useState({ telegramChatId: '', currentPassword: '', newPassword: '', confirmPassword: '' });
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profileNotice, setProfileNotice] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
   const welcomeTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -139,6 +169,8 @@ export default function TeacherPortalPage() {
         'teacher-alert-delete-failed': 'تعذر حذف التنبيه.',
         'teacher-alert-not-found': 'لم يتم العثور على التنبيه أو لا تملك صلاحية حذفه.',
         'student-year-mismatch': 'لا يمكن إرسال تنبيه لطالب من سنة دراسية مختلفة عن المادة.',
+        'invalid-teacher-profile': 'تحقق من Chat ID أو أدخل كلمة مرور جديدة من 8 محارف على الأقل.',
+        'teacher-profile-update-failed': 'تعذر حفظ إعدادات الحساب.',
       };
       throw new Error(messages[result.error ?? ''] ?? 'حدث خطأ أثناء تنفيذ الطلب. حاول مرة أخرى.');
     }
@@ -211,6 +243,77 @@ export default function TeacherPortalPage() {
     }
   };
 
+  const openProfileSettings = () => {
+    setProfileDraft({
+      telegramChatId: teacher?.telegramChatId ?? '',
+      currentPassword: '',
+      newPassword: '',
+      confirmPassword: '',
+    });
+    setNotice(null);
+    setProfileNotice(null);
+    setShowProfileSettings(true);
+  };
+
+  const saveProfileSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const telegramChatId = profileDraft.telegramChatId.trim();
+    const cleanedChatId = telegramChatId.replace(/[^0-9-]/g, '');
+    const newPassword = profileDraft.newPassword.trim();
+    const confirmPassword = profileDraft.confirmPassword.trim();
+    const currentPassword = profileDraft.currentPassword || credentials.password;
+    if (telegramChatId && (!/^-?\d{1,20}$/.test(cleanedChatId) || cleanedChatId === '-')) {
+      setProfileNotice({ message: 'معرف التلجرام غير صالح. استخدم Chat ID الذي أرسله لك البوت.', type: 'error' });
+      return;
+    }
+    if (newPassword && newPassword.length < 8) {
+      setProfileNotice({ message: 'يجب أن تتكون كلمة المرور الجديدة من 8 محارف على الأقل.', type: 'error' });
+      return;
+    }
+    if (newPassword && !profileDraft.currentPassword) {
+      setProfileNotice({ message: 'أدخل كلمة المرور الحالية لتأكيد تغييرها.', type: 'error' });
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setProfileNotice({ message: 'تأكيد كلمة المرور الجديدة غير مطابق.', type: 'error' });
+      return;
+    }
+
+    setSavingProfile(true);
+    setProfileNotice(null);
+    try {
+      await request({
+        action: 'update-profile',
+        username: credentials.username,
+        password: currentPassword,
+        telegramChatId: cleanedChatId,
+        ...(newPassword ? { newPassword } : {}),
+      });
+      setTeacher((current) => current ? { ...current, telegramChatId: cleanedChatId } : current);
+      if (newPassword) {
+        setCredentials((current) => ({ ...current, password: newPassword }));
+        if (rememberCredentials) {
+          window.localStorage.setItem(rememberedTeacherPasswordKey, newPassword);
+          setLoginDraft((current) => ({ ...current, password: newPassword }));
+        }
+      }
+      writeAuditLog({
+        action: 'teacher_profile_updated',
+        userType: 'teacher',
+        userId: teacher?.id,
+        username: credentials.username,
+        fullName: teacher?.name,
+        details: { telegramLinked: Boolean(cleanedChatId), passwordChanged: Boolean(newPassword) },
+      });
+      setShowProfileSettings(false);
+      setNotice({ message: 'تم حفظ إعدادات الحساب بنجاح.', type: 'success' });
+    } catch (error) {
+      setProfileNotice({ message: error instanceof Error ? error.message : 'تعذر حفظ إعدادات الحساب.', type: 'error' });
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   const currentAttendance = useMemo(
     () => attendance.filter((record) => record.subject === selectedSubject),
     [attendance, selectedSubject]
@@ -250,6 +353,14 @@ export default function TeacherPortalPage() {
     () => studentsForSubject,
     [studentsForSubject]
   );
+  const filteredStudentsForAlert = useMemo(() => {
+    const query = alertStudentSearch.trim().toLocaleLowerCase();
+    if (!query) return studentsForAlert;
+    return studentsForAlert.filter((student) =>
+      student.fullName.toLocaleLowerCase().includes(query)
+      || student.id.toLocaleLowerCase().includes(query)
+    );
+  }, [alertStudentSearch, studentsForAlert]);
   const visibleAlerts = useMemo(
     () => alerts.filter((alert) => alert.subject === selectedSubject),
     [alerts, selectedSubject]
@@ -379,6 +490,7 @@ export default function TeacherPortalPage() {
 
   const selectStudentForAlert = (studentId: string) => {
     setSelectedStudentId(studentId);
+    setAlertStudentSearch(studentsForAlert.find((student) => student.id === studentId)?.fullName ?? '');
     alertMessageRef.current?.focus();
   };
 
@@ -424,8 +536,19 @@ export default function TeacherPortalPage() {
     setStudents([]);
     setAttendance([]);
     setAlerts([]);
+    setActiveTab('students');
     setNotice(null);
   };
+
+  const teacherTabs: Array<{ key: TeacherTab; label: string; description: string; count?: number; icon: typeof LayoutDashboard }> = [
+    { key: 'students', label: 'الطلاب', description: 'قائمة الطلاب والفئات', count: visibleStudents.length, icon: LayoutDashboard },
+    { key: 'attendance', label: 'الحضور والغياب', description: 'سجل المادة', count: currentAttendance.length, icon: ClipboardList },
+    { key: 'alerts', label: 'تنبيهات الطلاب', description: 'إرسال ومراجعة التنبيهات', count: visibleAlerts.length, icon: BellRing },
+    { key: 'grades', label: 'العلامات', description: 'إعداد المواد وإدخال العلامات', icon: GraduationCap },
+    { key: 'announcements', label: 'الإعلانات', description: 'نشر إعلان للطلاب', icon: Megaphone },
+    { key: 'courses', label: 'المقررات', description: 'رفع وإدارة المحاضرات', icon: BookOpen },
+    { key: 'inquiries', label: 'استفسارات الطلاب', description: 'قراءة الأسئلة والرد عليها', icon: MessageCircle },
+  ];
 
   return (
     <main className="teacher-portal" dir="rtl">
@@ -437,9 +560,11 @@ export default function TeacherPortalPage() {
             <p>{teacher ? 'بيانات طلابك وسجل الحضور والتنبيهات الخاصة بمقرراتك.' : 'سجّل الدخول لعرض الطلاب وحضور مقرراتك.'}</p>
           </div>
           <div className="teacher-portal-header-actions">
-            <Link href="/dashboard" className="teacher-portal-link">لوحة التحكم</Link>
             {teacher && (
               <>
+                <button type="button" className="teacher-portal-link" onClick={openProfileSettings}>
+                  <Settings size={16} aria-hidden="true" /> إعدادات الحساب
+                </button>
                 <button type="button" className="teacher-portal-icon-button" onClick={() => void refreshDashboard()} disabled={loading} aria-label="تحديث البيانات">
                   <RefreshCw size={17} aria-hidden="true" />
                 </button>
@@ -499,18 +624,88 @@ export default function TeacherPortalPage() {
           </section>
         ) : (
           <>
-            <section className="teacher-subject-selector">
+            <div className="teacher-workspace">
+              <aside className="teacher-sidebar" aria-label="أقسام بوابة المدرس">
+                <div className="teacher-sidebar-profile">
+                  <span className="teacher-sidebar-avatar"><UserRound size={23} aria-hidden="true" /></span>
+                  <span><strong>{teacher.name}</strong><small>بوابة المدرّس</small></span>
+                </div>
+                <nav className="teacher-sidebar-nav" aria-label="التبويبات">
+                  {teacherTabs.map((tab) => {
+                    const Icon = tab.icon;
+                    return (
+                      <button
+                        type="button"
+                        key={tab.key}
+                        className={`teacher-sidebar-tab${activeTab === tab.key ? ' is-active' : ''}`}
+                        onClick={() => setActiveTab(tab.key)}
+                        aria-current={activeTab === tab.key ? 'page' : undefined}
+                      >
+                        <Icon size={19} aria-hidden="true" />
+                        <span className="teacher-sidebar-tab-copy">
+                          <strong>{tab.label}</strong>
+                          <small>{tab.description}</small>
+                        </span>
+                        {typeof tab.count === 'number' && <span className="teacher-sidebar-tab-count">{tab.count}</span>}
+                      </button>
+                    );
+                  })}
+                </nav>
+                <div className="teacher-sidebar-hint">
+                  <BookOpen size={16} aria-hidden="true" />
+                  <span>المادة المحددة: <strong>{selectedSubject || 'لا توجد مادة'}</strong></span>
+                </div>
+              </aside>
+              <div className="teacher-workspace-main">
+            {['students', 'attendance', 'alerts', 'grades'].includes(activeTab) && <section className="teacher-subject-selector">
               <label htmlFor="teacher-subject">المادة</label>
               <select id="teacher-subject" value={selectedSubject} onChange={(event) => {
                 setSelectedSubject(event.target.value);
                 setSelectedStudentId('');
+                setAlertStudentSearch('');
                 setSelectedClass('__all__');
               }}>
                 {teacher.subjects.map((subject) => <option key={subject} value={subject}>{subject}</option>)}
               </select>
               <span><BookOpen size={16} aria-hidden="true" /> تظهر هنا سجلات المادة المختارة فقط</span>
-            </section>
+            </section>}
 
+            {activeTab === 'courses' && (
+            <CourseMaterialsPanel
+              mode="teacher"
+              username={credentials.username}
+              password={credentials.password}
+            />
+
+            )}
+
+            {activeTab === 'grades' && (
+              <TeacherGradesPanel
+                username={credentials.username}
+                password={credentials.password}
+                selectedSubject={selectedSubject}
+                students={studentsForSubject}
+              />
+            )}
+
+            {activeTab === 'announcements' && (
+            <AnnouncementPanel
+              mode="teacher"
+              username={credentials.username}
+              password={credentials.password}
+              subjects={teacher.subjects}
+            />
+
+            )}
+
+            {activeTab === 'inquiries' && (
+              <TeacherInquiriesPanel
+                username={credentials.username}
+                password={credentials.password}
+              />
+            )}
+
+            {activeTab === 'students' && <>
             <section className="teacher-stats-grid" aria-label="ملخص المادة">
               <article><Users size={20} aria-hidden="true" /><span>طلاب الفئة المحددة</span><strong>{visibleStudents.length}</strong></article>
               <article><span className="teacher-status-dot present" /><span>سجلات الحضور</span><strong>{currentAttendance.filter((record) => getAttendanceStatus(record.status) === 'present').length}</strong></article>
@@ -670,7 +865,9 @@ export default function TeacherPortalPage() {
               </div>
             </section>
 
-            <section className="teacher-panel">
+            </>}
+
+            {activeTab === 'attendance' && <section className="teacher-panel">
               <div className="teacher-panel-heading">
                 <div><h2>سجل الحضور والغياب</h2><p>السجلات المعروضة تخص مادة {selectedSubject} فقط.</p></div>
                 <CalendarDays size={20} aria-hidden="true" />
@@ -694,19 +891,33 @@ export default function TeacherPortalPage() {
                     );
                   }) : <p className="teacher-empty">لا توجد سجلات حضور أو غياب لهذه المادة بعد.</p>}
               </div>
-            </section>
+            </section>}
 
-            <section className="teacher-panel teacher-alert-panel">
+            {activeTab === 'alerts' && <section className="teacher-panel teacher-alert-panel">
               <div className="teacher-panel-heading">
                 <div><h2>تنبيه طالب</h2><p>سيظهر التنبيه في سجل الطالب بخلفية صفراء.</p></div>
                 <AlertTriangle size={20} aria-hidden="true" />
               </div>
               <form className="teacher-alert-form" onSubmit={submitAlert}>
+                <label>
+                  <span>ابحث عن الطالب بالاسم أو الرقم الجامعي</span>
+                  <input
+                    type="search"
+                    value={alertStudentSearch}
+                    onChange={(event) => {
+                      setAlertStudentSearch(event.target.value);
+                      setSelectedStudentId('');
+                    }}
+                    placeholder="اكتب اسم الطالب أو رقمه..."
+                    autoComplete="off"
+                  />
+                </label>
                 <label><span>الطالب</span>
                   <select value={selectedStudentId} onChange={(event) => setSelectedStudentId(event.target.value)} required>
                     <option value="">اختر الطالب</option>
-                    {studentsForAlert.map((student) => <option key={student.id} value={student.id}>{student.fullName} — {student.id}</option>)}
+                    {filteredStudentsForAlert.map((student) => <option key={student.id} value={student.id}>{student.fullName} — {student.id}</option>)}
                   </select>
+                  {!filteredStudentsForAlert.length && <small>لا يوجد طالب مطابق لهذا البحث في المادة المحددة.</small>}
                 </label>
                 <label className="teacher-alert-message"><span>نص التنبيه</span>
                   <textarea ref={alertMessageRef} value={alertMessage} onChange={(event) => setAlertMessage(event.target.value)} minLength={3} maxLength={1000} rows={3} required />
@@ -724,8 +935,76 @@ export default function TeacherPortalPage() {
                 ))}
                 {!visibleAlerts.length && <p className="teacher-empty">لا توجد تنبيهات لهذه المادة.</p>}
               </div>
-            </section>
+            </section>}
+              </div>
+            </div>
           </>
+        )}
+        {showProfileSettings && (
+          <div
+            className="teacher-settings-backdrop"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget && !savingProfile) setShowProfileSettings(false);
+            }}
+          >
+            <section className="teacher-settings-modal" role="dialog" aria-modal="true" aria-labelledby="teacher-settings-title">
+              <header className="teacher-settings-header">
+                <div>
+                  <h2 id="teacher-settings-title">إعدادات الحساب</h2>
+                  <p>اربط حساب تيليجرام أو غيّر كلمة مرور بوابة المدرسين.</p>
+                </div>
+                <button type="button" onClick={() => setShowProfileSettings(false)} disabled={savingProfile} aria-label="إغلاق"><X size={19} /></button>
+              </header>
+              <form className="teacher-settings-form" onSubmit={saveProfileSettings}>
+                <label>
+                  <span>معرف تيليجرام (Chat ID)</span>
+                  <input
+                    value={profileDraft.telegramChatId}
+                    onChange={(event) => setProfileDraft((current) => ({ ...current, telegramChatId: event.target.value }))}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    dir="ltr"
+                    placeholder="مثال: 123456789"
+                  />
+                </label>
+                <a href="https://t.me/DTI_Portal_Bot" target="_blank" rel="noreferrer">افتح بوت المعهد واضغط Start للحصول على Chat ID</a>
+                <p className="teacher-settings-help">اترك خانة Chat ID فارغة لإلغاء الربط. لتغيير كلمة المرور، أدخل كلمة المرور الحالية والجديدة.</p>
+                {profileNotice && <p className={`teacher-settings-notice ${profileNotice.type}`} role={profileNotice.type === 'error' ? 'alert' : 'status'}>{profileNotice.message}</p>}
+                <label>
+                  <span>كلمة المرور الحالية</span>
+                  <input
+                    type="password"
+                    value={profileDraft.currentPassword}
+                    onChange={(event) => setProfileDraft((current) => ({ ...current, currentPassword: event.target.value }))}
+                    autoComplete="current-password"
+                  />
+                </label>
+                <label>
+                  <span>كلمة المرور الجديدة <small>اختياري — 8 محارف على الأقل</small></span>
+                  <input
+                    type="password"
+                    value={profileDraft.newPassword}
+                    onChange={(event) => setProfileDraft((current) => ({ ...current, newPassword: event.target.value }))}
+                    autoComplete="new-password"
+                    minLength={8}
+                  />
+                </label>
+                <label>
+                  <span>تأكيد كلمة المرور الجديدة</span>
+                  <input
+                    type="password"
+                    value={profileDraft.confirmPassword}
+                    onChange={(event) => setProfileDraft((current) => ({ ...current, confirmPassword: event.target.value }))}
+                    autoComplete="new-password"
+                  />
+                </label>
+                <div className="teacher-settings-actions">
+                  <button type="button" className="teacher-settings-cancel" onClick={() => setShowProfileSettings(false)} disabled={savingProfile}>إلغاء</button>
+                  <button type="submit" className="teacher-settings-save" disabled={savingProfile}>{savingProfile ? 'جارٍ الحفظ...' : 'حفظ التعديلات'}</button>
+                </div>
+              </form>
+            </section>
+          </div>
         )}
         {selectedStudentPhoto && (
           <div

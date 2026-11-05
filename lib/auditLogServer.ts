@@ -2,7 +2,7 @@ import 'server-only';
 import { isIP } from 'net';
 import { createClient } from '@supabase/supabase-js';
 
-type AuditUserType = 'student' | 'teacher' | 'supervisor' | 'system';
+type AuditUserType = 'student' | 'teacher' | 'supervisor' | 'support_supervisor' | 'system';
 
 type AuditEvent = {
   action: string;

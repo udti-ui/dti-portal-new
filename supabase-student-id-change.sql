@@ -28,3 +28,14 @@ create policy "students can rollback id change"
 
 create index if not exists student_id_change_new_id_idx
   on public.student_id_change_requests (new_university_id);
+
+create table if not exists public.student_id_change_locks (
+  student_year text primary key check (student_year in ('أولى', 'ثانية')),
+  is_open boolean not null default true,
+  updated_by text not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.student_id_change_locks enable row level security;
+revoke all on public.student_id_change_locks from anon, authenticated;
+grant all on public.student_id_change_locks to service_role;

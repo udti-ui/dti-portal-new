@@ -29,6 +29,9 @@ create table if not exists public.student_chat_messages (
 );
 
 alter table public.student_chat_messages
+  add column if not exists is_support_staff boolean not null default false;
+
+alter table public.student_chat_messages
   add column if not exists student_year text,
   add column if not exists attachment_name text,
   add column if not exists attachment_type text,
@@ -133,20 +136,40 @@ create table if not exists public.student_chat_bans (
   student_id text primary key check (char_length(btrim(student_id)) between 1 and 80),
   student_name text not null,
   created_at timestamptz not null default now(),
-  banned_by text not null
+  banned_by text not null,
+  expires_at timestamptz,
+  reason text
 );
+
+alter table public.student_chat_bans
+  add column if not exists expires_at timestamptz,
+  add column if not exists reason text;
+
+create table if not exists public.student_chat_support_staff (
+  student_id text primary key check (char_length(btrim(student_id)) between 1 and 80),
+  student_name text not null,
+  granted_at timestamptz not null default now(),
+  granted_by text not null,
+  is_active boolean not null default true,
+  deactivated_at timestamptz,
+  deactivated_by text
+);
+
+create index if not exists student_chat_support_staff_active_idx
+  on public.student_chat_support_staff (is_active, granted_at desc);
 
 alter table public.student_chat_settings disable row level security;
 alter table public.student_chat_messages disable row level security;
 alter table public.student_chat_attachments disable row level security;
 alter table public.student_chat_message_reads disable row level security;
 alter table public.student_chat_bans disable row level security;
+alter table public.student_chat_support_staff disable row level security;
 
 revoke all on public.student_chat_settings, public.student_chat_messages, public.student_chat_attachments,
-  public.student_chat_message_reads, public.student_chat_bans
+  public.student_chat_message_reads, public.student_chat_bans, public.student_chat_support_staff
   from anon, authenticated;
 grant all on public.student_chat_settings, public.student_chat_messages, public.student_chat_attachments,
-  public.student_chat_message_reads, public.student_chat_bans
+  public.student_chat_message_reads, public.student_chat_bans, public.student_chat_support_staff
   to service_role;
 
 create extension if not exists pg_cron;

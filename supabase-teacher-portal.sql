@@ -1,6 +1,7 @@
 alter table public.teachers
   add column if not exists login_username text,
-  add column if not exists password_hash text;
+  add column if not exists password_hash text,
+  add column if not exists telegram_chat_id text;
 
 create unique index if not exists teachers_login_username_lower_idx
   on public.teachers (lower(login_username))

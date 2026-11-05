@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createSupabaseAdminClient } from '../../../lib/supabaseAdmin';
 import { normalizeStudentYear } from '../../../lib/studentData';
-import { verifyFirstDegreeSupervisor } from '../../../lib/supervisorAuth';
+import { verifyFirstDegreeSupervisor, verifySupervisorCredentials } from '../../../lib/supervisorAuth';
+import { writeServerAuditLog } from '../../../lib/auditLogServer';
 
 export const dynamic = 'force-dynamic';
 
@@ -116,11 +117,13 @@ const enrichChatMessages = async (
   const studentIds = [...new Set(rows.map((row) => clean(row.student_id)).filter(Boolean))];
   if (!studentIds.length) return rows.map((row) => ({ ...row, student_name: getFirstName(row.student_name), avatar_url: null }));
 
-  const { data: students, error } = await supabase.from('students').select('*').in('الرقم الجامعي', studentIds);
-  if (error) {
-    console.error('STUDENT_CHAT_AVATAR_LOOKUP_FAILED:', error.message);
-    return rows.map((row) => ({ ...row, student_name: getFirstName(row.student_name), avatar_url: null }));
-  }
+  const [{ data: students, error }, { data: supportStaff, error: supportError }] = await Promise.all([
+    supabase.from('students').select('*').in('الرقم الجامعي', studentIds),
+    supabase.from('student_chat_support_staff').select('student_id').eq('is_active', true).in('student_id', studentIds),
+  ]);
+  if (error) console.error('STUDENT_CHAT_AVATAR_LOOKUP_FAILED:', error.message);
+  if (supportError) console.error('STUDENT_CHAT_SUPPORT_BADGE_LOOKUP_FAILED:', supportError.message);
+  const supportStaffIds = new Set((supportStaff ?? []).map((staff) => clean(staff.student_id)));
   const profiles = new Map((students ?? []).map((student) => {
     const record = student as Record<string, unknown>;
     return [getStudentIdentifier(record), {
@@ -137,6 +140,7 @@ const enrichChatMessages = async (
       ...row,
       student_name: profile?.firstName ?? getFirstName(row.student_name),
       avatar_url: profile?.avatarUrl ?? null,
+      is_support_staff: row.is_support_staff === true || supportStaffIds.has(clean(row.student_id)),
     };
   });
 };
@@ -150,7 +154,7 @@ const getUnreadMessages = async (
   studentYear: 'أولى' | 'ثانية'
 ) => {
   const { data: messages, error: messagesError } = await supabase.from('student_chat_messages')
-    .select('id, student_id, student_name, student_year, message, created_at, attachment_name, attachment_type, attachment_size')
+    .select('id, student_id, student_name, student_year, message, created_at, attachment_name, attachment_type, attachment_size, is_support_staff')
     .eq('student_year', studentYear)
     .neq('student_id', studentId)
     .gte('created_at', new Date(Date.now() - retentionMs).toISOString())
@@ -212,6 +216,156 @@ export async function POST(request: Request) {
   const supabase = createSupabaseAdminClient();
   if (!supabase) return errorResponse('chat-service-not-configured', 503);
 
+  if (body.action === 'validate-dashboard-session') {
+    const username = clean(body.username);
+    const password = clean(body.password);
+    if (!username || username.length > 160 || !password || password.length > 300) {
+      return errorResponse('credentials-required', 400);
+    }
+    const supervisor = await verifySupervisorCredentials(supabase, username, password);
+    if (supervisor.failed) return errorResponse('supervisor-lookup-failed', 500);
+    if (supervisor.valid) {
+      const degree = String(supervisor.supervisor?.['الدرجة'] ?? supervisor.supervisor?.degree
+        ?? supervisor.supervisor?.rank ?? supervisor.supervisor?.role ?? supervisor.supervisor?.level ?? '');
+      const normalizedDegree = degree.replace(/\s+/g, '').toLocaleLowerCase();
+      const isAllowedDegree = ['1', '١', '2', '٢', '3', '٣', '4', '٤', 'one', 'first', 'firstdegree', 'اولى',
+        'الأولى', 'الدرجةالأولى', 'درجةالأولى', '1st', '1stdegree', 'moderator', 'مودرييتور', 'monitor', 'مراقب',
+        'supervisor', 'سوبر', 'سوبرفايزور', 'super', 'supervisor2', 'second', 'ثانية', 'الثانية', 'third', 'ثالثة',
+        'الثالثة', 'fayzor', 'fayzur', 'فايزور', 'faizur', 'four', 'fourth', '4th', '4thdegree', 'degree4', 'level4',
+        'level4supervisor', 'رابعة', 'الرابعة', 'الدرجةالرابعة', 'درجةالرابعة', 'الدرجة4', 'درجة4', 'الدرجة٤',
+        'درجة٤', 'supervisor4']
+        .includes(normalizedDegree);
+      if (!isAllowedDegree) return errorResponse('session-invalid', 401);
+      return NextResponse.json({
+        success: true,
+        accountType: 'supervisor',
+        degree,
+      });
+    }
+
+    const authentication = await authenticateStudent(supabase, username, password);
+    if (authentication.failed) return errorResponse('student-lookup-failed', 500);
+    if (!authentication.student) return errorResponse('session-invalid', 401);
+    const { data: supportStaff, error } = await supabase.from('student_chat_support_staff')
+      .select('student_id').eq('student_id', username).eq('is_active', true).maybeSingle();
+    if (error) {
+      console.error('STUDENT_CHAT_SUPPORT_SESSION_LOOKUP_FAILED:', error.message);
+      return errorResponse('support-staff-lookup-failed', 500);
+    }
+    if (!supportStaff) return errorResponse('session-invalid', 401);
+    return NextResponse.json({
+      success: true,
+      accountType: 'support_student',
+      studentName: getStudentName(authentication.student),
+    });
+  }
+
+  if (body.action === 'support-login') {
+    const studentId = clean(body.studentId);
+    const password = clean(body.password);
+    if (!studentId || studentId.length > 80 || !password || password.length > 256) {
+      return errorResponse('student-credentials-required', 400);
+    }
+
+    const authentication = await authenticateStudent(supabase, studentId, password);
+    if (authentication.failed) return errorResponse('student-lookup-failed', 500);
+    const staffLookup = authentication.student
+      ? await supabase.from('student_chat_support_staff').select('student_id, student_name')
+        .eq('student_id', studentId).eq('is_active', true).maybeSingle()
+      : { data: null, error: null };
+    if (staffLookup.error) {
+      console.error('STUDENT_CHAT_SUPPORT_LOGIN_LOOKUP_FAILED:', staffLookup.error.message);
+      return errorResponse('support-staff-lookup-failed', 500);
+    }
+    if (!authentication.student || !staffLookup.data) {
+      await writeServerAuditLog(request, {
+        action: 'student_chat_support_login_failed',
+        userType: 'support_supervisor',
+        userId: studentId,
+        username: studentId,
+        details: { reason: authentication.student ? 'support-role-inactive' : 'invalid-student-credentials' },
+      });
+      return errorResponse('support-credentials-invalid', 401);
+    }
+    const supportName = getStudentName(authentication.student);
+    await writeServerAuditLog(request, {
+      action: 'student_chat_support_login',
+      userType: 'support_supervisor',
+      userId: studentId,
+      username: studentId,
+      fullName: supportName,
+      details: { role: 'chat_support' },
+    });
+    return NextResponse.json({ success: true, studentId, studentName: supportName, features: ['chat'] });
+  }
+
+  if ([
+    'support-staff-list',
+    'support-staff-lookup',
+    'grant-support-staff',
+    'revoke-support-staff',
+  ].includes(String(body.action))) {
+    const username = clean(body.supervisorUsername);
+    const password = clean(body.supervisorPassword);
+    if (!username || !password) return errorResponse('supervisor-credentials-required', 400);
+    const verification = await verifyFirstDegreeSupervisor(supabase, username, password);
+    if (verification.failed) return errorResponse('supervisor-lookup-failed', 500);
+    if (!verification.valid) return errorResponse('first-degree-supervisor-required', 403);
+
+    if (body.action === 'support-staff-list') {
+      const { data, error } = await supabase.from('student_chat_support_staff')
+        .select('student_id, student_name, granted_at, granted_by')
+        .eq('is_active', true).order('granted_at', { ascending: false });
+      if (error) {
+        console.error('STUDENT_CHAT_SUPPORT_STAFF_LIST_FAILED:', error.message);
+        return errorResponse('support-staff-load-failed', 500);
+      }
+      return NextResponse.json({ success: true, staff: data ?? [] });
+    }
+
+    const studentId = clean(body.studentId);
+    if (!studentId || studentId.length > 80) return errorResponse('student-id-required', 400);
+    const { data: student, error: studentError } = await supabase.from('students').select('*')
+      .eq('الرقم الجامعي', studentId).maybeSingle();
+    if (studentError) {
+      console.error('STUDENT_CHAT_SUPPORT_STUDENT_LOOKUP_FAILED:', studentError.message);
+      return errorResponse('student-lookup-failed', 500);
+    }
+    if (!student) return errorResponse('student-not-found', 404);
+    const studentName = getStudentName(student as Record<string, unknown>);
+
+    if (body.action === 'support-staff-lookup') {
+      return NextResponse.json({ success: true, student: { studentId, studentName } });
+    }
+
+    const staffChange = body.action === 'grant-support-staff'
+      ? await supabase.from('student_chat_support_staff').upsert({
+        student_id: studentId,
+        student_name: studentName,
+        granted_at: new Date().toISOString(),
+        granted_by: username,
+        is_active: true,
+        deactivated_at: null,
+        deactivated_by: null,
+      }, { onConflict: 'student_id' })
+      : await supabase.from('student_chat_support_staff').update({
+        is_active: false,
+        deactivated_at: new Date().toISOString(),
+        deactivated_by: username,
+      }).eq('student_id', studentId).eq('is_active', true);
+    if (staffChange.error) {
+      console.error('STUDENT_CHAT_SUPPORT_STAFF_CHANGE_FAILED:', staffChange.error.message);
+      return errorResponse('support-staff-save-failed', 500);
+    }
+    await writeServerAuditLog(request, {
+      action: body.action === 'grant-support-staff' ? 'student_chat_support_granted' : 'student_chat_support_revoked',
+      userType: 'supervisor',
+      username,
+      details: { studentId, studentName, role: 'chat_support' },
+    });
+    return NextResponse.json({ success: true });
+  }
+
   if ([
     'student-status',
     'student-messages',
@@ -220,6 +374,9 @@ export async function POST(request: Request) {
     'get-attachment',
     'edit-message',
     'delete-message',
+    'support-student-profile',
+    'support-mute-student',
+    'support-chat-opened',
   ].includes(String(body.action))) {
     const studentId = clean(body.studentId);
     const password = clean(body.password);
@@ -231,9 +388,133 @@ export async function POST(request: Request) {
     if (authentication.failed) return errorResponse('student-lookup-failed', 500);
     if (!authentication.student) return errorResponse('student-credentials-invalid', 401);
 
+    const { data: supportRole, error: supportRoleError } = await supabase.from('student_chat_support_staff')
+      .select('student_id').eq('student_id', studentId).eq('is_active', true).maybeSingle();
+    if (supportRoleError) {
+      console.error('STUDENT_CHAT_SUPPORT_ROLE_LOOKUP_FAILED:', supportRoleError.message);
+      if (['PGRST204', 'PGRST205', '42P01'].includes(supportRoleError.code ?? '')) {
+        return errorResponse('chat-schema-out-of-date', 503);
+      }
+      return errorResponse('chat-status-failed', 500);
+    }
+    const isSupportStaff = Boolean(supportRole);
+    const requestedYear = clean(body.studentYear);
+    const studentYear = isSupportStaff && ['أولى', 'ثانية'].includes(requestedYear)
+      ? requestedYear as 'أولى' | 'ثانية'
+      : getStudentYear(authentication.student);
+
+    if (body.action === 'support-student-profile') {
+      if (!isSupportStaff) return errorResponse('support-role-inactive', 403);
+      const targetStudentId = clean(body.targetStudentId);
+      if (!targetStudentId || targetStudentId.length > 80 || !['أولى', 'ثانية'].includes(requestedYear)) {
+        return errorResponse('invalid-student-id', 400);
+      }
+      const { data: target, error: targetError } = await supabase.from('students').select('*')
+        .eq('الرقم الجامعي', targetStudentId).maybeSingle();
+      if (targetError) {
+        console.error('STUDENT_CHAT_SUPPORT_PROFILE_LOOKUP_FAILED:', targetError.message);
+        return errorResponse('student-profile-load-failed', 500);
+      }
+      if (!target) return errorResponse('student-not-found', 404);
+      const record = target as Record<string, unknown>;
+      if (getStudentYear(record) !== requestedYear) return errorResponse('student-year-mismatch', 400);
+      await writeServerAuditLog(request, {
+        action: 'student_chat_support_profile_viewed',
+        userType: 'support_supervisor',
+        userId: studentId,
+        username: studentId,
+        fullName: getStudentName(authentication.student),
+        details: { targetStudentId, targetStudentName: getStudentName(record), studentYear: requestedYear },
+      });
+      return NextResponse.json({
+        success: true,
+        student: {
+          studentId: getStudentIdentifier(record),
+          studentName: getStudentName(record),
+          studentYear: requestedYear,
+          phone: clean(record['رقم الهاتف'] ?? record.phone ?? record.mobile ?? record['رقم الموبايل']),
+          avatarUrl: clean(record.avatar_url) || null,
+        },
+      });
+    }
+
+    if (body.action === 'support-chat-opened') {
+      if (!isSupportStaff) return errorResponse('support-role-inactive', 403);
+      if (!['أولى', 'ثانية'].includes(requestedYear)) return errorResponse('invalid-student-year', 400);
+      await writeServerAuditLog(request, {
+        action: 'student_chat_support_viewed',
+        userType: 'support_supervisor',
+        userId: studentId,
+        username: studentId,
+        fullName: getStudentName(authentication.student),
+        details: { studentYear: requestedYear },
+      });
+      return NextResponse.json({ success: true });
+    }
+
+    if (body.action === 'support-mute-student') {
+      if (!isSupportStaff) return errorResponse('support-role-inactive', 403);
+      const targetStudentId = clean(body.targetStudentId);
+      const reason = clean(body.reason).slice(0, 500);
+      if (!targetStudentId || targetStudentId.length > 80 || !['أولى', 'ثانية'].includes(requestedYear) || !reason) {
+        return errorResponse('mute-details-required', 400);
+      }
+      if (targetStudentId === studentId) return errorResponse('cannot-mute-self', 400);
+      const { data: target, error: targetError } = await supabase.from('students').select('*')
+        .eq('الرقم الجامعي', targetStudentId).maybeSingle();
+      if (targetError) {
+        console.error('STUDENT_CHAT_MUTE_STUDENT_LOOKUP_FAILED:', targetError.message);
+        return errorResponse('student-lookup-failed', 500);
+      }
+      if (!target) return errorResponse('student-not-found', 404);
+      if (getStudentYear(target as Record<string, unknown>) !== requestedYear) {
+        return errorResponse('student-year-mismatch', 400);
+      }
+      const { data: targetStaff, error: targetStaffError } = await supabase.from('student_chat_support_staff')
+        .select('student_id').eq('student_id', targetStudentId).eq('is_active', true).maybeSingle();
+      if (targetStaffError) {
+        console.error('STUDENT_CHAT_MUTE_ROLE_LOOKUP_FAILED:', targetStaffError.message);
+        return errorResponse('support-staff-lookup-failed', 500);
+      }
+      if (targetStaff) return errorResponse('cannot-mute-support-staff', 403);
+      const { data: existingBan, error: existingBanError } = await supabase.from('student_chat_bans')
+        .select('expires_at').eq('student_id', targetStudentId).maybeSingle();
+      if (existingBanError) {
+        console.error('STUDENT_CHAT_EXISTING_BAN_LOOKUP_FAILED:', existingBanError.message);
+        return errorResponse('chat-status-failed', 500);
+      }
+      if (existingBan && !existingBan.expires_at) return errorResponse('student-permanently-banned', 409);
+
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const targetRecord = target as Record<string, unknown>;
+      const targetName = getStudentName(targetRecord);
+      const { error: muteError } = await supabase.from('student_chat_bans').upsert({
+        student_id: targetStudentId,
+        student_name: targetName,
+        banned_by: studentId,
+        created_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        reason,
+      }, { onConflict: 'student_id' });
+      if (muteError) {
+        console.error('STUDENT_CHAT_MUTE_SAVE_FAILED:', muteError.message);
+        return errorResponse('chat-mute-save-failed', 500);
+      }
+      await writeServerAuditLog(request, {
+        action: 'student_chat_muted_24h',
+        userType: 'support_supervisor',
+        userId: studentId,
+        username: studentId,
+        fullName: getStudentName(authentication.student),
+        details: { studentId: targetStudentId, studentName: targetName, studentYear: requestedYear, reason, expiresAt },
+      });
+      return NextResponse.json({ success: true, expiresAt });
+    }
+
     const [settings, banResult] = await Promise.all([
       getSettings(supabase),
-      supabase.from('student_chat_bans').select('student_id').eq('student_id', studentId).maybeSingle(),
+      supabase.from('student_chat_bans').select('student_id, expires_at, reason')
+        .eq('student_id', studentId).maybeSingle(),
     ]);
     if (!settings) return errorResponse('chat-settings-not-configured', 503);
     const { data: ban, error: banError } = banResult;
@@ -241,21 +522,40 @@ export async function POST(request: Request) {
       console.error('STUDENT_CHAT_BAN_LOOKUP_FAILED:', banError.message);
       return errorResponse('chat-status-failed', 500);
     }
-    const isBanned = Boolean(ban);
+    const expiresAt = ban?.expires_at ? Date.parse(String(ban.expires_at)) : null;
+    const isMuted = Boolean(expiresAt && Number.isFinite(expiresAt) && expiresAt > Date.now());
+    const isBanned = Boolean(ban && !ban.expires_at);
 
-    const studentYear = getStudentYear(authentication.student);
     if (body.action === 'student-status') {
-      const isOpen = isYearChatOpen(settings, studentYear);
-      if (!isOpen || isBanned || !studentYear) {
-        return NextResponse.json({ success: true, isOpen, isBanned, unreadMessages: [] });
+      const ownYear = getStudentYear(authentication.student);
+      const isOpen = isYearChatOpen(settings, ownYear);
+      if ((!isOpen && !isSupportStaff) || isBanned || isMuted || (!ownYear && !isSupportStaff)) {
+        return NextResponse.json({
+          success: true,
+          isOpen: isOpen || isSupportStaff,
+          isBanned,
+          isMuted,
+          isSupportStaff,
+          muteExpiresAt: isMuted ? ban?.expires_at : null,
+          muteReason: isMuted ? ban?.reason : null,
+          unreadMessages: [],
+        });
       }
-      const unread = await getUnreadMessages(supabase, studentId, studentYear);
+      const unread = ownYear ? await getUnreadMessages(supabase, studentId, ownYear) : { error: null, messages: [] };
       if (unread.error) return errorResponse('chat-unread-messages-load-failed', 500);
-      return NextResponse.json({ success: true, isOpen, isBanned, unreadMessages: unread.messages ?? [] });
+      return NextResponse.json({ success: true, isOpen: isOpen || isSupportStaff, isBanned, isMuted, isSupportStaff, unreadMessages: unread.messages ?? [] });
     }
     if (!studentYear) return errorResponse('student-year-not-configured', 403);
-    if (!isYearChatOpen(settings, studentYear)) return errorResponse('chat-closed', 403);
+    if (!isSupportStaff && !isYearChatOpen(settings, studentYear)) return errorResponse('chat-closed', 403);
     if (isBanned) return errorResponse('student-chat-banned', 403);
+    if (isMuted && ['send-message', 'edit-message', 'delete-message'].includes(String(body.action))) {
+      return NextResponse.json({
+        success: false,
+        error: 'student-chat-muted',
+        reason: ban?.reason ?? null,
+        expiresAt: ban?.expires_at ?? null,
+      }, { status: 403 });
+    }
 
     if (body.action === 'mark-read') {
       const requestedIds = Array.isArray(body.messageIds)
@@ -289,6 +589,7 @@ export async function POST(request: Request) {
     }
 
     if (body.action === 'send-message') {
+      if (!isYearChatOpen(settings, studentYear)) return errorResponse('chat-closed', 403);
       const message = typeof body.message === 'string' ? body.message.trim() : '';
       if ((!message && !attachment) || message.length > 1000) return errorResponse('invalid-message', 400);
       if (containsProhibitedLanguage(message)) return errorResponse('message-not-allowed', 400);
@@ -308,6 +609,12 @@ export async function POST(request: Request) {
         }
       }
 
+      const { data: supportRole, error: supportRoleError } = await supabase.from('student_chat_support_staff')
+        .select('student_id').eq('student_id', studentId).eq('is_active', true).maybeSingle();
+      if (supportRoleError) {
+        console.error('STUDENT_CHAT_SUPPORT_SEND_ROLE_LOOKUP_FAILED:', supportRoleError.message);
+        return errorResponse('chat-status-failed', 500);
+      }
       const { data, error } = await supabase.from('student_chat_messages').insert({
         student_id: studentId,
         student_name: getStudentName(authentication.student),
@@ -316,7 +623,8 @@ export async function POST(request: Request) {
         attachment_name: attachment ? attachmentName : null,
         attachment_type: attachment ? attachmentType : null,
         attachment_size: attachment ? attachment.size : null,
-      }).select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size').single();
+        is_support_staff: Boolean(supportRole),
+      }).select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size, is_support_staff').single();
       if (error) {
         console.error('STUDENT_CHAT_MESSAGE_INSERT_FAILED:', { code: error.code, message: error.message });
         if (attachment && ['PGRST204', 'PGRST205', '42P01', '23514'].includes(error.code ?? '')) {
@@ -412,14 +720,15 @@ export async function POST(request: Request) {
         .eq('id', messageId)
         .eq('student_id', studentId)
         .eq('student_year', studentYear)
-        .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size')
+        .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size, is_support_staff')
         .maybeSingle();
       if (error) {
         console.error('STUDENT_CHAT_MESSAGE_EDIT_FAILED:', error.message);
         return errorResponse('message-edit-failed', 500);
       }
       if (!data) return errorResponse('message-not-found', 404);
-      return NextResponse.json({ success: true, message: data });
+      const enrichedMessages = await enrichChatMessages(supabase, [data as Record<string, unknown>]);
+      return NextResponse.json({ success: true, message: enrichedMessages[0] });
     }
 
     if (body.action === 'delete-message') {
@@ -438,10 +747,18 @@ export async function POST(request: Request) {
     }
 
     if (body.action !== 'student-messages') return errorResponse('invalid-action', 400);
+    const after = typeof body.after === 'string' ? Date.parse(body.after) : Number.NaN;
+    if (typeof body.after === 'string' && (!Number.isFinite(after) || after > Date.now() + 5000)) {
+      return errorResponse('invalid-message-cursor', 400);
+    }
+    const cursor = new Date().toISOString();
+    const minimumCreatedAt = Number.isFinite(after)
+      ? new Date(Math.max(Date.now() - retentionMs, after - 1000)).toISOString()
+      : new Date(Date.now() - retentionMs).toISOString();
     const { data: messages, error: messagesError } = await supabase.from('student_chat_messages')
-      .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size')
+      .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size, is_support_staff')
       .eq('student_year', studentYear)
-      .gte('created_at', new Date(Date.now() - retentionMs).toISOString())
+      .gte('created_at', minimumCreatedAt)
       .order('created_at', { ascending: false })
       .limit(200);
     if (messagesError) {
@@ -471,6 +788,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
+      cursor,
       messages: (await enrichChatMessages(supabase, sortedMessages as Array<Record<string, unknown>>)).map((message) => ({
         ...message,
         viewer_count: readCounts.get(String(message.id)) ?? 0,
@@ -486,21 +804,49 @@ export async function POST(request: Request) {
     'set-year-open',
     'ban-student',
     'unban-student',
+    'mute-student',
   ].includes(String(body.action))) {
-    const username = clean(body.supervisorUsername);
-    const password = clean(body.supervisorPassword);
-    if (!username || username.length > 160 || !password || password.length > 300) {
-      return errorResponse('supervisor-credentials-required', 400);
+    const supervisorUsername = clean(body.supervisorUsername);
+    const supervisorPassword = clean(body.supervisorPassword);
+    const supportStudentId = clean(body.supportStudentId);
+    const supportPassword = clean(body.supportPassword);
+    let supportOperator: { studentId: string; studentName: string } | null = null;
+    let username = supervisorUsername;
+
+    if (supportStudentId) {
+      if (supportStudentId.length > 80 || !supportPassword || supportPassword.length > 256) {
+        return errorResponse('support-credentials-required', 400);
+      }
+      const authentication = await authenticateStudent(supabase, supportStudentId, supportPassword);
+      if (authentication.failed) return errorResponse('student-lookup-failed', 500);
+      if (!authentication.student) return errorResponse('support-credentials-invalid', 401);
+      const { data: staff, error: staffError } = await supabase.from('student_chat_support_staff')
+        .select('student_id').eq('student_id', supportStudentId).eq('is_active', true).maybeSingle();
+      if (staffError) {
+        console.error('STUDENT_CHAT_SUPPORT_AUTHORIZATION_FAILED:', staffError.message);
+        return errorResponse('support-staff-lookup-failed', 500);
+      }
+      if (!staff) return errorResponse('support-role-inactive', 403);
+      supportOperator = { studentId: supportStudentId, studentName: getStudentName(authentication.student) };
+      username = supportOperator.studentId;
+    } else {
+      if (!supervisorUsername || supervisorUsername.length > 160 || !supervisorPassword || supervisorPassword.length > 300) {
+        return errorResponse('supervisor-credentials-required', 400);
+      }
+      const verification = await verifyFirstDegreeSupervisor(supabase, supervisorUsername, supervisorPassword);
+      if (verification.failed) return errorResponse('supervisor-lookup-failed', 500);
+      if (!verification.valid) return errorResponse('first-degree-supervisor-required', 403);
     }
 
-    const verification = await verifyFirstDegreeSupervisor(supabase, username, password);
-    if (verification.failed) return errorResponse('supervisor-lookup-failed', 500);
-    if (!verification.valid) return errorResponse('first-degree-supervisor-required', 403);
+    if (supportOperator && !['admin-state', 'admin-messages', 'admin-get-attachment', 'mute-student'].includes(String(body.action))) {
+      return errorResponse('support-action-not-allowed', 403);
+    }
+
     if (body.action === 'admin-messages') {
       const studentYear = body.studentYear;
       if (!['أولى', 'ثانية'].includes(String(studentYear))) return errorResponse('invalid-student-year', 400);
       const { data: messages, error } = await supabase.from('student_chat_messages')
-        .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size')
+        .select('id, student_id, student_name, student_year, message, created_at, edited_at, attachment_name, attachment_type, attachment_size, is_support_staff')
         .eq('student_year', studentYear)
         .gte('created_at', new Date(Date.now() - retentionMs).toISOString())
         .order('created_at', { ascending: false })
@@ -560,18 +906,23 @@ export async function POST(request: Request) {
       const settings = await getSettings(supabase);
       if (!settings) return errorResponse('chat-settings-not-configured', 503);
       const { data: bans, error } = await supabase.from('student_chat_bans')
-        .select('student_id, student_name, created_at, banned_by')
+        .select('student_id, student_name, created_at, banned_by, expires_at, reason')
         .order('created_at', { ascending: false });
       if (error) {
         console.error('STUDENT_CHAT_BANS_LOOKUP_FAILED:', error.message);
         return errorResponse('chat-bans-load-failed', 500);
       }
+      const visibleBans = supportOperator
+        ? (bans ?? []).filter((ban) => Boolean(
+          ban.expires_at && Date.parse(String(ban.expires_at)) > Date.now()
+        ))
+        : bans ?? [];
       return NextResponse.json({
         success: true,
         isOpen: settings.is_open_first || settings.is_open_second,
         isOpenFirst: settings.is_open_first,
         isOpenSecond: settings.is_open_second,
-        bans: bans ?? [],
+        bans: visibleBans,
       });
     }
 
@@ -625,6 +976,67 @@ export async function POST(request: Request) {
 
     const studentId = clean(body.studentId);
     if (!studentId || studentId.length > 80) return errorResponse('student-id-required', 400);
+    if (body.action === 'mute-student') {
+      if (!supportOperator) return errorResponse('support-action-not-allowed', 403);
+      const studentYear = body.studentYear;
+      const reason = clean(body.reason).slice(0, 500);
+      if (!['أولى', 'ثانية'].includes(String(studentYear)) || !reason) {
+        return errorResponse('mute-details-required', 400);
+      }
+      if (studentId === supportOperator.studentId) return errorResponse('cannot-mute-self', 400);
+      const { data: student, error: studentError } = await supabase.from('students').select('*')
+        .eq('الرقم الجامعي', studentId).maybeSingle();
+      if (studentError) {
+        console.error('STUDENT_CHAT_MUTE_STUDENT_LOOKUP_FAILED:', studentError.message);
+        return errorResponse('student-lookup-failed', 500);
+      }
+      if (!student) return errorResponse('student-not-found', 404);
+      if (getStudentYear(student as Record<string, unknown>) !== studentYear) {
+        return errorResponse('student-year-mismatch', 400);
+      }
+      const { data: targetStaff, error: targetStaffError } = await supabase.from('student_chat_support_staff')
+        .select('student_id').eq('student_id', studentId).eq('is_active', true).maybeSingle();
+      if (targetStaffError) {
+        console.error('STUDENT_CHAT_MUTE_ROLE_LOOKUP_FAILED:', targetStaffError.message);
+        return errorResponse('support-staff-lookup-failed', 500);
+      }
+      if (targetStaff) return errorResponse('cannot-mute-support-staff', 403);
+
+      const { data: existingBan, error: existingBanError } = await supabase.from('student_chat_bans')
+        .select('expires_at').eq('student_id', studentId).maybeSingle();
+      if (existingBanError) {
+        console.error('STUDENT_CHAT_EXISTING_BAN_LOOKUP_FAILED:', existingBanError.message);
+        return errorResponse('chat-status-failed', 500);
+      }
+      if (existingBan && !existingBan.expires_at) {
+        return errorResponse('student-permanently-banned', 409);
+      }
+
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const studentName = getStudentName(student as Record<string, unknown>);
+      const { error } = await supabase.from('student_chat_bans').upsert({
+        student_id: studentId,
+        student_name: studentName,
+        banned_by: supportOperator.studentId,
+        created_at: new Date().toISOString(),
+        expires_at: expiresAt,
+        reason,
+      }, { onConflict: 'student_id' });
+      if (error) {
+        console.error('STUDENT_CHAT_MUTE_SAVE_FAILED:', error.message);
+        return errorResponse('chat-mute-save-failed', 500);
+      }
+      await writeServerAuditLog(request, {
+        action: 'student_chat_muted_24h',
+        userType: 'support_supervisor',
+        userId: supportOperator.studentId,
+        username: supportOperator.studentId,
+        fullName: supportOperator.studentName,
+        details: { studentId, studentName, studentYear, reason, expiresAt },
+      });
+      return NextResponse.json({ success: true, expiresAt });
+    }
+
     if (body.action === 'ban-student') {
       const authentication = await supabase.from('students').select('*')
         .eq('الرقم الجامعي', studentId).maybeSingle();
@@ -638,6 +1050,9 @@ export async function POST(request: Request) {
         student_id: studentId,
         student_name: getStudentName(student),
         banned_by: username,
+        created_at: new Date().toISOString(),
+        expires_at: null,
+        reason: null,
       }, { onConflict: 'student_id' });
       if (error) {
         console.error('STUDENT_CHAT_BAN_SAVE_FAILED:', error.message);

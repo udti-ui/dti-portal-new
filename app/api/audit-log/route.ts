@@ -5,8 +5,8 @@ import { createSupabaseAdminClient } from '../../../lib/supabaseAdmin';
 export const dynamic = 'force-dynamic';
 
 const clean = (value: unknown, maxLength = 500) => String(value ?? '').trim().slice(0, maxLength);
-const isAuditUserType = (value: string): value is 'student' | 'teacher' | 'supervisor' | 'system' =>
-  ['student', 'teacher', 'supervisor', 'system'].includes(value);
+const isAuditUserType = (value: string): value is 'student' | 'teacher' | 'supervisor' | 'support_supervisor' | 'system' =>
+  ['student', 'teacher', 'supervisor', 'support_supervisor', 'system'].includes(value);
 const normalize = (value: unknown) => clean(value, 200).replace(/\s+/g, '').toLocaleLowerCase();
 
 const readAuditLogs = async (username: string, password: string) => {

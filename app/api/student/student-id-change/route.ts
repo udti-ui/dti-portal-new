@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '../../../../lib/supabase';
+import { createSupabaseAdminClient } from '../../../../lib/supabaseAdmin';
 import { normalizeStudentIdentifier } from '../../../../lib/studentData';
 
 export const dynamic = 'force-dynamic';
@@ -14,6 +15,20 @@ const errorResponse = (error: string, status: number, details?: string) => NextR
 const isMissingTableError = (error: { message?: string }) => {
   const message = String(error.message ?? '').toLowerCase();
   return message.includes('does not exist') || message.includes('relation') || message.includes('not found');
+};
+const normalizeStudentYear = (value: unknown): 'أولى' | 'ثانية' | '' => {
+  const year = normalize(value).replace(/\s+/g, '').toLocaleLowerCase();
+  if (['1', '١'].includes(year) || year.includes('اولى') || year.includes('أولى') || year.includes('first')) return 'أولى';
+  if (['2', '٢'].includes(year) || year.includes('ثانية') || year.includes('ثاني') || year.includes('second')) return 'ثانية';
+  return '';
+};
+const getLockStatus = async (year: 'أولى' | 'ثانية') => {
+  const admin = createSupabaseAdminClient();
+  if (!admin) return { closed: false, error: 'SUPABASE_SERVICE_ROLE_KEY is not configured.' };
+  const { data, error } = await admin.from('student_id_change_locks')
+    .select('is_open').eq('student_year', year).maybeSingle();
+  if (error) return { closed: false, error: error.message };
+  return { closed: data?.is_open === false, error: null };
 };
 
 export async function GET(request: Request) {
@@ -32,7 +47,23 @@ export async function GET(request: Request) {
     return errorResponse('student-id-change-status-failed', 500, error.message);
   }
 
-  return NextResponse.json({ success: true, used: Boolean(data) });
+  const { data: student, error: studentError } = await supabase.from('students').select('*')
+    .eq('الرقم الجامعي', studentId).maybeSingle();
+  if (studentError) {
+    console.error('STUDENT_ID_CHANGE_ERROR:', studentError);
+    return errorResponse('student-id-change-status-failed', 500, studentError.message);
+  }
+  const studentRecord = student as Record<string, unknown> | null;
+  const year = normalizeStudentYear(studentRecord?.['السنه الدراسية'] ?? studentRecord?.['السنة الدراسية'] ?? studentRecord?.student_year ?? studentRecord?.year);
+  if (year) {
+    const lock = await getLockStatus(year);
+    if (lock.error) {
+      console.error('STUDENT_ID_CHANGE_LOCK_CHECK_FAILED:', lock.error);
+      return errorResponse('student-id-change-lock-check-failed', 503, 'تعذر التحقق من إعداد السماح بتغيير الرقم الجامعي.');
+    }
+    return NextResponse.json({ success: true, used: Boolean(data), closed: lock.closed });
+  }
+  return NextResponse.json({ success: true, used: Boolean(data), closed: false });
 }
 
 export async function POST(request: Request) {
@@ -66,6 +97,17 @@ export async function POST(request: Request) {
       row['الرقم الجامعي'] ?? row.student_id ?? row.studentId ?? row.id
     ) === currentStudentId);
     if (!student) return errorResponse('student-not-found', 404, 'لم يتم العثور على حساب الطالب الحالي.');
+    const studentYear = normalizeStudentYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.student_year ?? student.year);
+    if (studentYear) {
+      const lock = await getLockStatus(studentYear);
+      if (lock.error) {
+        console.error('STUDENT_ID_CHANGE_LOCK_CHECK_FAILED:', lock.error);
+        return errorResponse('student-id-change-lock-check-failed', 503, 'تعذر التحقق من إعداد السماح بتغيير الرقم الجامعي.');
+      }
+      if (lock.closed) {
+        return errorResponse('student-id-change-closed', 403, `تغيير الرقم الجامعي مغلق حالياً لطلاب السنة ${studentYear}.`);
+      }
+    }
 
     const duplicateStudent = studentRows.find((row) => normalizeStudentIdentifier(
       row['الرقم الجامعي'] ?? row.student_id ?? row.studentId ?? row.id

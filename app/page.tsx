@@ -8,6 +8,9 @@ import { Bell, Code2, Download, MessageCircle, Pencil, Settings, X } from 'lucid
 import { supabase } from '../lib/supabase';
 import { writeAuditLog } from '../lib/auditLog';
 import StudentChat from './components/StudentChat';
+import AnnouncementPanel from './components/AnnouncementPanel';
+import CourseMaterialsPanel from './components/CourseMaterialsPanel';
+import StudentTeacherInquiries from './components/StudentTeacherInquiries';
 import {
   getStudentById,
   getTeacherAlertsForStudent,
@@ -18,7 +21,7 @@ import {
   StudentRow,
 } from '../lib/studentData';
 
-type TabKey = 'grades' | 'record' | 'status' | 'schedule' | 'skills' | 'attendance' | 'chat';
+type TabKey = 'announcements' | 'courses' | 'grades' | 'record' | 'status' | 'schedule' | 'skills' | 'attendance' | 'chat' | 'teacher-inquiries';
 type StudentChatNotification = {
   id: string;
   student_id: string;
@@ -54,6 +57,16 @@ type GradeEntry = {
   assistance: string;
 };
 
+type TeacherGrade = {
+  id: string;
+  subject: string;
+  component: string;
+  componentLabel: string;
+  score: number;
+  maxScore: number;
+  updatedAt: string;
+};
+
 const studentSessionStorageKey = 'udti-student-session';
 const rememberedStudentIdStorageKey = 'udti-remembered-student-id';
 const rememberedStudentPasswordStorageKey = 'udti-remembered-student-password';
@@ -78,6 +91,11 @@ const metadataKeys = new Set([
   'updated_at',
   'createdAt',
   'updatedAt',
+  'created_by_supervisor',
+  'supervisor_created_at',
+  'force_password_change',
+  'telegram_verification_code',
+  'avatar_url',
 ]);
 
 const formatStudentValue = (value: string | number | null | undefined) => {
@@ -232,13 +250,20 @@ const initClickSound = () => {
 
 export default function Home() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [activeTab, setActiveTab] = useState<TabKey>('record');
+  const [activeTab, setActiveTab] = useState<TabKey>('announcements');
   const [notice, setNotice] = useState('يرجى تسجيل الدخول لعرض نتائجك');
   const [loginData, setLoginData] = useState({ studentId: '', password: '' });
   const [rememberStudentId, setRememberStudentId] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [loggedStudent, setLoggedStudent] = useState<StudentRow | null>(null);
+  const [firstLoginStudent, setFirstLoginStudent] = useState<StudentRow | null>(null);
+  const [firstLoginPassword, setFirstLoginPassword] = useState('');
+  const [firstLoginPasswordConfirm, setFirstLoginPasswordConfirm] = useState('');
+  const [firstLoginPasswordSaving, setFirstLoginPasswordSaving] = useState(false);
   const [grades, setGrades] = useState<GradeEntry[]>([]);
+  const [teacherGrades, setTeacherGrades] = useState<TeacherGrade[]>([]);
+  const [teacherGradesLoading, setTeacherGradesLoading] = useState(false);
+  const [teacherGradeLoadError, setTeacherGradeLoadError] = useState('');
   const [warnings, setWarnings] = useState<Record<string, unknown>[]>([]);
   const [teacherAlertLoadError, setTeacherAlertLoadError] = useState('');
   const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>([]);
@@ -251,7 +276,7 @@ export default function Home() {
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarNotice, setAvatarNotice] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [showAccountModal, setShowAccountModal] = useState(false);
-  const [accountDraft, setAccountDraft] = useState({ email: '', phone: '', password: '' });
+  const [accountDraft, setAccountDraft] = useState({ email: '', phone: '', password: '', telegramChatId: '' });
   const [accountModalNotice, setAccountModalNotice] = useState('');
   const [isSavingAccount, setIsSavingAccount] = useState(false);
   const [isExportingQr, setIsExportingQr] = useState(false);
@@ -259,6 +284,7 @@ export default function Home() {
   const [studentStatus, setStudentStatus] = useState<string>('غير متوفر');
   const [attendanceCheckInBusy, setAttendanceCheckInBusy] = useState(false);
   const [studentChatAvailable, setStudentChatAvailable] = useState(false);
+  const [isChatSupportStaff, setIsChatSupportStaff] = useState(false);
   const [unreadChatMessages, setUnreadChatMessages] = useState<StudentChatNotification[]>([]);
   const [chatNotificationOpen, setChatNotificationOpen] = useState(false);
   const [selectedChatMessageId, setSelectedChatMessageId] = useState('');
@@ -281,6 +307,8 @@ export default function Home() {
   const [studentIdChangeConfirmed, setStudentIdChangeConfirmed] = useState(false);
   const [isChangingStudentId, setIsChangingStudentId] = useState(false);
   const [studentIdChangeCompleted, setStudentIdChangeCompleted] = useState(false);
+  const [studentIdChangeClosed, setStudentIdChangeClosed] = useState(false);
+  const [studentIdChangeStatusError, setStudentIdChangeStatusError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [telegramNotificationsEnabled, setTelegramNotificationsEnabled] = useState(false);
   const [showTelegramSettingsModal, setShowTelegramSettingsModal] = useState(false);
@@ -357,6 +385,7 @@ export default function Home() {
   useEffect(() => {
     if (!isLoggedIn || !studentChatStudentId || !studentChatPassword) {
       setStudentChatAvailable(false);
+      setIsChatSupportStaff(false);
       setUnreadChatMessages([]);
       setChatNotificationOpen(false);
       unreadChatMessageIdsRef.current = null;
@@ -381,11 +410,16 @@ export default function Home() {
           success?: boolean;
           isOpen?: boolean;
           isBanned?: boolean;
+          isSupportStaff?: boolean;
           unreadMessages?: StudentChatNotification[];
         };
-        const available = response.ok && result.success === true && result.isOpen === true && result.isBanned !== true;
+        const isSupportStaff = response.ok && result.success === true && result.isSupportStaff === true;
+        const available = response.ok && result.success === true
+          && (result.isOpen === true || isSupportStaff)
+          && result.isBanned !== true;
         if (cancelled) return;
         setStudentChatAvailable(available);
+        setIsChatSupportStaff(isSupportStaff);
         const unreadMessages = available ? result.unreadMessages ?? [] : [];
         const currentIds = new Set(unreadMessages.map((message) => message.id));
         const previousIds = unreadChatMessageIdsRef.current;
@@ -705,14 +739,23 @@ export default function Home() {
   }, []);
 
   const tabs: Array<{ key: TabKey; label: string }> = [
+    { key: 'announcements', label: 'الإعلانات' },
+    { key: 'courses', label: 'المقررات' },
     { key: 'grades', label: 'العلامات' },
     { key: 'record', label: 'السجل' },
     { key: 'status', label: 'الحالة' },
     { key: 'attendance', label: 'تسجيل الحضور' },
+    { key: 'teacher-inquiries', label: 'تواصل مع المدرس' },
     ...(studentChatAvailable ? [{ key: 'chat' as const, label: 'دردشة الطلاب' }] : []),
     ...(hasStudentGroup ? [{ key: 'schedule' as const, label: 'برنامج الدوام' }] : []),
     { key: 'skills', label: 'مهاراتي' },
   ];
+  const groupedTeacherGrades = Array.from(teacherGrades.reduce((groups, grade) => {
+    const subjectGrades = groups.get(grade.subject) ?? [];
+    subjectGrades.push(grade);
+    groups.set(grade.subject, subjectGrades);
+    return groups;
+  }, new Map<string, TeacherGrade[]>()).entries());
 
   const submitAttendanceCheckIn = useCallback(async (
     source: 'audio' | 'qr',
@@ -904,12 +947,21 @@ export default function Home() {
 
       const studentId = String(loggedStudent['الرقم الجامعي'] ?? '').trim();
       if (studentId) {
+        setStudentIdChangeStatusError('');
+        setStudentIdChangeClosed(false);
         void fetch(`/api/student/student-id-change?studentId=${encodeURIComponent(studentId)}`)
-          .then((response) => response.json() as Promise<{ success?: boolean; used?: boolean }>)
-          .then((result) => {
-            if (result.success) setStudentIdChangeCompleted(result.used === true);
+          .then(async (response) => {
+            const result = await response.json() as { success?: boolean; used?: boolean; closed?: boolean; details?: string };
+            if (!response.ok || !result.success) throw new Error(result.details ?? 'تعذر التحقق من حالة تغيير الرقم الجامعي.');
+            return result;
           })
-          .catch(() => undefined);
+          .then((result) => {
+            setStudentIdChangeCompleted(result.used === true);
+            setStudentIdChangeClosed(result.closed === true);
+          })
+          .catch((error: unknown) => setStudentIdChangeStatusError(
+            error instanceof Error ? error.message : 'تعذر التحقق من حالة تغيير الرقم الجامعي.'
+          ));
       }
     }
   }, [loggedStudent]);
@@ -927,6 +979,37 @@ export default function Home() {
     window.addEventListener('popstate', handleStudentBackNavigation);
     return () => window.removeEventListener('popstate', handleStudentBackNavigation);
   }, [isLoggedIn]);
+
+  const fetchTeacherGrades = useCallback(async () => {
+    if (!loggedStudent || !loggedStudent['الرقم الجامعي']) {
+      return { data: [] as TeacherGrade[], error: new Error('تعذر تحديد حساب الطالب.') };
+    }
+
+    try {
+      const response = await fetch('/api/student/grades', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: String(loggedStudent['الرقم الجامعي']),
+          password: String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? ''),
+        }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string; grades?: TeacherGrade[] };
+      if (!response.ok || !result.success) {
+        const messages: Record<string, string> = {
+          'student-grades-schema-not-configured': 'علامات المدرسين غير مفعّلة بعد. يرجى إبلاغ إدارة النظام بتشغيل ملف إعداد العلامات.',
+          'student-grades-load-failed': 'تعذر تحميل علامات المواد.',
+        };
+        throw new Error(messages[result.error ?? ''] ?? 'تعذر تحميل علامات المواد.');
+      }
+      return { data: result.grades ?? [], error: null };
+    } catch (error) {
+      return {
+        data: [] as TeacherGrade[],
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
+  }, [loggedStudent]);
 
   const refreshDashboard = useCallback(async () => {
     if (!loggedStudent || !loggedStudent['الرقم الجامعي']) return;
@@ -952,7 +1035,8 @@ export default function Home() {
           error: error instanceof Error ? error : new Error(String(error)),
         }))
         : Promise.resolve({ data: [], error: null });
-      const [studentResult, warningsResult, teacherAlertsResult, gradesResult, scheduleResult, skillsResult] = await Promise.all([
+      const gradeQuery = fetchTeacherGrades();
+      const [studentResult, warningsResult, teacherAlertsResult, gradesResult, teacherGradesResult, scheduleResult, skillsResult] = await Promise.all([
         getStudentById(studentId),
         getWarningsForStudent(studentId).then((rows) => ({ data: rows })),
         getTeacherAlertsForStudent(
@@ -967,6 +1051,7 @@ export default function Home() {
             return String(rowStudentId ?? '') === String(studentId);
           }) : [],
         })),
+        gradeQuery,
         scheduleQuery,
         supabase.from('student_skills').select('skills').eq('student_id', studentId).maybeSingle(),
       ]);
@@ -978,6 +1063,8 @@ export default function Home() {
 
       const gradeRows = gradesResult.data.flatMap((row) => extractGrades([row as unknown as Record<string, unknown>]));
       setGrades(gradeRows);
+      setTeacherGrades(teacherGradesResult.data);
+      setTeacherGradeLoadError(teacherGradesResult.error?.message ?? '');
       setWarnings([...(warningsResult.data as unknown as Record<string, unknown>[]), ...teacherAlertsResult.data]
         .sort((first, second) => String(second['التاريخ'] ?? '').localeCompare(String(first['التاريخ'] ?? ''))));
       setTeacherAlertLoadError(teacherAlertsResult.error?.message ?? '');
@@ -1019,7 +1106,7 @@ export default function Home() {
     } catch {
       setNotice('حدث خطأ أثناء تحديث البيانات من قاعدة البيانات');
     }
-  }, [loggedStudent]);
+  }, [fetchTeacherGrades, loggedStudent]);
 
   const toggleSkillCategory = (category: string) => {
     setSkillDrafts((current) => {
@@ -1205,6 +1292,7 @@ export default function Home() {
       email: String(getRecordValue(studentRecord, ['البريد الإلكتروني', 'email']) ?? ''),
       phone: String(getRecordValue(studentRecord, ['رقم الهاتف', 'phone']) ?? ''),
       password: '',
+      telegramChatId: getStudentTelegramChatId(loggedStudent),
     });
     setAccountModalNotice('');
     setAvatarNotice(null);
@@ -1217,9 +1305,15 @@ export default function Home() {
     const email = accountDraft.email.trim();
     const phone = accountDraft.phone.trim();
     const password = accountDraft.password;
+    const telegramChatId = accountDraft.telegramChatId.trim();
+    const normalizedTelegramChatId = telegramChatId.replace(/[^0-9-]/g, '');
     if (!studentId) return;
     if (password && password.length < 8) {
       setAccountModalNotice('يجب أن تتكون كلمة المرور من 8 محارف على الأقل.');
+      return;
+    }
+    if (telegramChatId && (!/^-?\d{1,20}$/.test(normalizedTelegramChatId) || normalizedTelegramChatId === '-')) {
+      setAccountModalNotice('معرف التلجرام غير صالح. أدخل رقم Chat ID كما أرسله لك البوت.');
       return;
     }
 
@@ -1227,7 +1321,7 @@ export default function Home() {
     setAccountModalNotice('');
     try {
       const studentRecord = loggedStudent as Record<string, unknown>;
-      const updatePayload: Record<string, string> = {
+      const updatePayload: Record<string, unknown> = {
       };
       const emailColumns = ['البريد الإلكتروني', 'email'].filter((column) => Object.prototype.hasOwnProperty.call(studentRecord, column));
       const phoneColumns = ['رقم الهاتف', 'phone'].filter((column) => Object.prototype.hasOwnProperty.call(studentRecord, column));
@@ -1236,6 +1330,12 @@ export default function Home() {
       if (password) {
         const passwordColumns = ['كلمة السر', 'password'].filter((column) => Object.prototype.hasOwnProperty.call(studentRecord, column));
         (passwordColumns.length ? passwordColumns : ['كلمة السر']).forEach((column) => { updatePayload[column] = password; });
+      }
+      const previousTelegramChatId = getStudentTelegramChatId(loggedStudent);
+      const telegramChatIdChanged = normalizedTelegramChatId !== previousTelegramChatId;
+      if (telegramChatIdChanged) {
+        updatePayload.telegram_chat_id = normalizedTelegramChatId || null;
+        updatePayload.telegram_notifications_enabled = Boolean(normalizedTelegramChatId);
       }
 
       const { data: updatedStudent, error } = await supabase
@@ -1249,6 +1349,9 @@ export default function Home() {
 
       const updatedRecord = updatedStudent as StudentRow;
       setLoggedStudent((current) => current ? { ...current, ...updatedRecord } : current);
+      if (telegramChatIdChanged) {
+        setTelegramNotificationsEnabled(Boolean(normalizedTelegramChatId));
+      }
       if (password) {
         setLoginData((current) => ({ ...current, password }));
         if (rememberStudentId) {
@@ -1267,6 +1370,7 @@ export default function Home() {
           emailChanged: email !== String(getRecordValue(studentRecord, ['البريد الإلكتروني', 'email']) ?? '').trim(),
           phoneChanged: phone !== String(getRecordValue(studentRecord, ['رقم الهاتف', 'phone']) ?? '').trim(),
           passwordChanged: Boolean(password),
+          telegramChatIdChanged,
         },
       });
     } catch (error) {
@@ -1496,12 +1600,24 @@ export default function Home() {
         telegram_notifications_enabled: preference
       } as StudentRow;
 
+      const record = user as Record<string, unknown>;
+      const forcePasswordChange = record.force_password_change === true
+        || ['true', '1', 'yes'].includes(String(record.force_password_change ?? '').toLocaleLowerCase());
+      const studentYear = normalizeStudentYear(getRecordValue(record, ['السنه الدراسية', 'السنة الدراسية', 'year', 'student_year']));
+      if (forcePasswordChange && studentYear === 'أولى') {
+        setFirstLoginStudent(hydratedUser);
+        setFirstLoginPassword('');
+        setFirstLoginPasswordConfirm('');
+        setNotice('لأمان حسابك، يجب تعيين كلمة مرور جديدة قبل المتابعة.');
+        return;
+      }
+
       setStudentSkills([]);
       setSkillDrafts([]);
       setIsEditingSkills(false);
       setLoggedStudent(hydratedUser);
       setTelegramNotificationsEnabled(preference);
-      setActiveTab('record');
+      setActiveTab('announcements');
       setIsLoggedIn(true);
       if (rememberStudentId) {
         window.localStorage.setItem(rememberedStudentIdStorageKey, studentId);
@@ -1530,6 +1646,78 @@ export default function Home() {
       setToast({ message: 'حدث خطأ أثناء تسجيل الدخول', type: 'error' });
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleFirstLoginPasswordChange = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!firstLoginStudent) return;
+    if (firstLoginPassword.length < 8) {
+      setNotice('كلمة المرور يجب ألا تقل عن 8 محارف.');
+      return;
+    }
+    if (firstLoginPassword !== firstLoginPasswordConfirm) {
+      setNotice('كلمتا المرور غير متطابقتين.');
+      return;
+    }
+
+    setFirstLoginPasswordSaving(true);
+    try {
+      const studentId = String(firstLoginStudent['الرقم الجامعي'] ?? '').trim();
+      const currentPassword = String(getRecordValue(firstLoginStudent as Record<string, unknown>, ['كلمة السر', 'password']) ?? '');
+      const response = await fetch('/api/student/first-login-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ studentId, currentPassword, newPassword: firstLoginPassword }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string; auditWarning?: boolean };
+      if (!response.ok || !result.success) {
+        setNotice(`تعذر تغيير كلمة المرور: ${result.error || 'خطأ غير معروف'}`);
+        return;
+      }
+
+      const updatedStudent = {
+        ...firstLoginStudent,
+        'كلمة السر': firstLoginPassword,
+        force_password_change: false,
+      } as StudentRow;
+      setStudentSkills([]);
+      setSkillDrafts([]);
+      setIsEditingSkills(false);
+      setLoggedStudent(updatedStudent);
+      setTelegramNotificationsEnabled(getStudentTelegramPreference(updatedStudent));
+      setActiveTab('announcements');
+      setIsLoggedIn(true);
+      setFirstLoginStudent(null);
+      setFirstLoginPassword('');
+      setFirstLoginPasswordConfirm('');
+      if (rememberStudentId) {
+        window.localStorage.setItem(rememberedStudentIdStorageKey, studentId);
+        window.localStorage.setItem(rememberedStudentPasswordStorageKey, firstLoginPassword);
+      } else {
+        window.localStorage.removeItem(rememberedStudentIdStorageKey);
+        window.localStorage.removeItem(rememberedStudentPasswordStorageKey);
+      }
+      const fullName = [
+        updatedStudent['اسم الطالب'],
+        updatedStudent['اسم الاب'],
+        updatedStudent['الكنية'],
+      ].map((part) => String(part ?? '').trim()).filter(Boolean).join(' ');
+      writeAuditLog({
+        action: 'student_login',
+        userType: 'student',
+        userId: studentId,
+        username: fullName,
+        fullName,
+      });
+      setNotice(result.auditWarning
+        ? 'تم تغيير كلمة المرور وتسجيل الدخول، لكن تعذر تسجيل العملية؛ أبلغ الإدارة.'
+        : 'تم تغيير كلمة المرور وتسجيل الدخول بنجاح.');
+    } catch (error) {
+      console.error('First-login password change failed:', error);
+      setNotice('حدث خطأ أثناء تغيير كلمة المرور. حاول مرة أخرى.');
+    } finally {
+      setFirstLoginPasswordSaving(false);
     }
   };
 
@@ -1800,6 +1988,8 @@ export default function Home() {
     window.localStorage.removeItem(studentSessionStorageKey);
     setIsLoggedIn(false);
     setLoggedStudent(null);
+    setTeacherGrades([]);
+    setTeacherGradeLoadError('');
     setStudentChatAvailable(false);
     setStudentSkills([]);
     setSkillDrafts([]);
@@ -1852,9 +2042,9 @@ export default function Home() {
             <h3>جامعة اللاذقية</h3>
           </div>
 
-          <h1 className="login-title">{showPasswordReset ? 'إعادة تعيين كلمة المرور' : 'استعلام قسم تعويضات أسنان'}</h1>
+          <h1 className="login-title">{firstLoginStudent ? 'تغيير كلمة المرور لأول مرة' : showPasswordReset ? 'إعادة تعيين كلمة المرور' : 'استعلام قسم تعويضات أسنان'}</h1>
 
-          <form onSubmit={handleLogin} className="login-form">
+          <form onSubmit={handleLogin} className="login-form" style={firstLoginStudent ? { display: 'none' } : undefined}>
             <div className="form-group">
               <input
                 type="text"
@@ -1914,7 +2104,36 @@ export default function Home() {
             </button>
           </form>
 
-          <button
+          {firstLoginStudent && (
+            <form onSubmit={(event) => void handleFirstLoginPasswordChange(event)} className="password-reset-panel">
+              <p>مرحباً {String(firstLoginStudent['اسم الطالب'] ?? '')}. يجب تغيير كلمة المرور قبل فتح حسابك.</p>
+              <input
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                value={firstLoginPassword}
+                onChange={(event) => setFirstLoginPassword(event.target.value)}
+                placeholder="كلمة المرور الجديدة - 8 محارف على الأقل"
+                required
+                disabled={firstLoginPasswordSaving}
+              />
+              <input
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                value={firstLoginPasswordConfirm}
+                onChange={(event) => setFirstLoginPasswordConfirm(event.target.value)}
+                placeholder="تأكيد كلمة المرور الجديدة"
+                required
+                disabled={firstLoginPasswordSaving}
+              />
+              <button type="submit" className="login-button password-reset-action" disabled={firstLoginPasswordSaving}>
+                {firstLoginPasswordSaving ? 'جارٍ حفظ كلمة المرور...' : 'تغيير كلمة المرور والمتابعة'}
+              </button>
+            </form>
+          )}
+
+          {!firstLoginStudent && <button
             type="button"
             className="forgot-password-button"
             aria-expanded={showPasswordReset}
@@ -1933,9 +2152,9 @@ export default function Home() {
             }}
           >
             {showPasswordReset ? 'العودة إلى تسجيل الدخول' : 'نسيت كلمة المرور؟'}
-          </button>
+          </button>}
 
-          {showPasswordReset && (
+          {showPasswordReset && !firstLoginStudent && (
             <section className="password-reset-panel">
               <h3>استعادة كلمة المرور</h3>
               <p>أدخل الرقم الجامعي أو رقم الهاتف للبحث عن حسابك.</p>
@@ -2195,6 +2414,19 @@ export default function Home() {
                     />
                   </label>
                   <label className="student-account-field">
+                    <span>حساب تيليجرام <small>أدخل Chat ID الذي أرسله لك بوت المعهد، واتركه فارغًا لإلغاء الربط.</small></span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      dir="ltr"
+                      value={accountDraft.telegramChatId}
+                      onChange={(event) => setAccountDraft((current) => ({ ...current, telegramChatId: event.target.value }))}
+                      placeholder="مثال: 123456789"
+                    />
+                  </label>
+                  <a href="https://t.me/DTI_Portal_Bot" target="_blank" rel="noreferrer">افتح بوت المعهد للحصول على Chat ID</a>
+                  <label className="student-account-field">
                     <span>كلمة المرور الجديدة <small>اتركها فارغة إذا لم ترد تغييرها</small></span>
                     <input
                       type="password"
@@ -2404,7 +2636,23 @@ export default function Home() {
             </div>
           </div>
 
-          {!studentIdChangeCompleted && (
+          {!studentIdChangeCompleted && studentIdChangeStatusError && (
+            <div role="alert" className="student-id-change-manager" style={{ marginTop: 18, padding: '20px 24px', background: '#fff7ed', borderRadius: 16, border: '1px solid #fdba74' }}>
+              <h3 style={{ margin: 0, fontSize: 18, color: '#9a3412' }}>تعذر التحقق من تغيير الرقم الجامعي</h3>
+              <p style={{ margin: '10px 0 0', color: '#9a3412', fontSize: 14, lineHeight: 1.8 }}>{studentIdChangeStatusError}</p>
+            </div>
+          )}
+
+          {!studentIdChangeCompleted && !studentIdChangeStatusError && studentIdChangeClosed && (
+            <div role="status" className="student-id-change-manager" style={{ marginTop: 18, padding: '20px 24px', background: '#f8fafc', borderRadius: 16, border: '1px solid #cbd5e1' }}>
+              <h3 style={{ margin: 0, fontSize: 18, color: '#475569' }}>تغيير الرقم الجامعي مغلق</h3>
+              <p style={{ margin: '10px 0 0', color: '#64748b', fontSize: 14, lineHeight: 1.8 }}>
+                لا يمكن تغيير الرقم الجامعي حالياً. يرجى مراجعة إدارة الكلية عند الحاجة.
+              </p>
+            </div>
+          )}
+
+          {!studentIdChangeCompleted && !studentIdChangeStatusError && !studentIdChangeClosed && (
             <div className="student-id-change-manager" style={{ marginTop: 18, padding: '20px 24px', background: '#fffaf0', borderRadius: 16, border: '1px solid #ead7ad' }}>
             <h3 style={{ margin: 0, fontSize: 18, color: '#7c4a03' }}>تغيير الرقم الجامعي</h3>
             <p style={{ margin: '10px 0 6px', color: '#5f4b2b', fontSize: 14, lineHeight: 1.8 }}>
@@ -2487,8 +2735,8 @@ export default function Home() {
               <div className="student-telegram-modal" style={{ gridColumn: '1 / -1', background: '#f8fafc', border: '1px solid #dbeafe', borderRadius: 14, padding: 20 }}>
                 <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>تفعيل تنبيهات التلجرام 🔔</div>
                 <ol style={{ color: '#475569', lineHeight: 1.8, marginBottom: 12, paddingRight: 20 }}>
-                  <li>اضغط على زر "فتح بوت المعهد" أدناه.</li>
-                  <li>اضغط على زر (Start / ابدأ) داخل التلجرام.</li>
+                  <li>اضغط على زر فتح بوت المعهد أدناه.</li>
+                  <li>اضغط على زر ابدأ داخل التلجرام.</li>
                   <li>قم بنسخ رقم الـ Chat ID الذي سيرسله لك البوت وضعه في الخانة المخصصة أدناه.</li>
                 </ol>
                 <a
@@ -2559,6 +2807,14 @@ export default function Home() {
                   type="button"
                   onClick={() => {
                     setActiveTab(tab.key);
+                    if (tab.key === 'grades') {
+                      setTeacherGradesLoading(true);
+                      setTeacherGradeLoadError('');
+                      void fetchTeacherGrades().then((result) => {
+                        setTeacherGrades(result.data);
+                        setTeacherGradeLoadError(result.error?.message ?? '');
+                      }).finally(() => setTeacherGradesLoading(false));
+                    }
                     writeAuditLog({
                       action: 'student_tab_opened',
                       userType: 'student',
@@ -2573,6 +2829,27 @@ export default function Home() {
                 </button>
               ))}
             </div>
+
+            {activeTab === 'announcements' && loggedStudent && (
+              <div className="tab-content active">
+                <AnnouncementPanel
+                  mode="student"
+                  studentId={String(loggedStudent['الرقم الجامعي'] ?? '')}
+                  password={String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? '')}
+                  studentYear={normalizeStudentYear(getRecordValue(loggedStudent as Record<string, unknown>, ['السنه الدراسية', 'السنة الدراسية', 'year', 'student_year']))}
+                />
+              </div>
+            )}
+
+            {activeTab === 'courses' && loggedStudent && (
+              <div className="tab-content active">
+                <CourseMaterialsPanel
+                  mode="student"
+                  studentId={String(loggedStudent['الرقم الجامعي'] ?? '')}
+                  password={String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? '')}
+                />
+              </div>
+            )}
 
             {activeTab === 'attendance' && (
               <div className="tab-content active">
@@ -2646,22 +2923,62 @@ export default function Home() {
               <div className="tab-content active">
                 <StudentChat
                   studentId={studentChatStudentId}
+                  studentName={studentFullName}
                   password={studentChatPassword}
                   studentYear={studentChatYear}
+                  supportMode={isChatSupportStaff}
                   selectedMessageId={selectedChatMessageId}
                   onIncomingMessage={playIncomingChatSound}
                 />
               </div>
             )}
 
+            {activeTab === 'teacher-inquiries' && loggedStudent && (
+              <div className="tab-content active">
+                <StudentTeacherInquiries
+                  studentId={String(loggedStudent['الرقم الجامعي'] ?? '')}
+                  password={String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? '')}
+                />
+              </div>
+            )}
+
             {activeTab === 'grades' && (
               <div className="tab-content active">
-                {grades.length === 0 ? (
+                {teacherGradesLoading ? (
+                  <div className="no-data" role="status" aria-live="polite">
+                    <span
+                      className="spinner-inline"
+                      aria-hidden="true"
+                      style={{ width: 28, height: 28, borderColor: '#cbd5e1', borderTopColor: '#0f766e' }}
+                    />
+                    <div>جارٍ تحميل العلامات...</div>
+                  </div>
+                ) : (
+                  <>
+                    {teacherGradeLoadError && <p className="teacher-alert-load-error" role="alert">{teacherGradeLoadError}</p>}
+                    {teacherGrades.length > 0 && (
+                  <table>
+                    <thead>
+                      <tr><th>المادة</th><th>العلامات المدخلة</th></tr>
+                    </thead>
+                    <tbody>
+                      {groupedTeacherGrades.map(([subject, entries]) => (
+                        <tr key={subject}>
+                          <td>{subject}</td>
+                          <td>{entries.map((entry) => `${entry.componentLabel}: ${entry.score} / ${entry.maxScore}`).join(' · ')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                    )}
+                    {grades.length === 0 && teacherGrades.length === 0 && !teacherGradeLoadError ? (
                   <div className="no-data">
                     <i className="fa-solid fa-table-list" />
                     <div>لا توجد بيانات للعلامات حتى الآن.</div>
                   </div>
-                ) : (
+                    ) : grades.length > 0 && !teacherGradeLoadError ? (
+                  <>
+                    {teacherGrades.length > 0 && <h3>العلامات السابقة</h3>}
                   <table>
                     <thead>
                       <tr>
@@ -2686,6 +3003,9 @@ export default function Home() {
                       ))}
                     </tbody>
                   </table>
+                  </>
+                    ) : null}
+                  </>
                 )}
               </div>
             )}

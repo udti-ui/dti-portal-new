@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { FileText, Image as ImageIcon, Paperclip, Pencil, Send, Trash2, X } from 'lucide-react';
+import { FileText, Gavel, Image as ImageIcon, Paperclip, Pencil, Send, Trash2, X } from 'lucide-react';
 import Image from 'next/image';
 
 type ChatMessage = {
@@ -16,16 +16,27 @@ type ChatMessage = {
   attachment_type?: string | null;
   attachment_size?: number | null;
   avatar_url?: string | null;
+  is_support_staff?: boolean;
   viewer_count?: number;
   pending?: boolean;
 };
 
 type StudentChatProps = {
   studentId: string;
+  studentName: string;
   password: string;
   studentYear: 'أولى' | 'ثانية' | '';
+  supportMode?: boolean;
   selectedMessageId?: string;
   onIncomingMessage?: (messageIds: string[]) => void;
+};
+
+type ChatStudentProfile = {
+  studentId: string;
+  studentName: string;
+  studentYear: 'أولى' | 'ثانية';
+  phone: string;
+  avatarUrl: string | null;
 };
 
 const allowedAttachmentTypes = new Set([
@@ -43,6 +54,17 @@ const imageExtensions = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'h
 const requestErrorMessages: Record<string, string> = {
   'chat-closed': 'الدردشة مغلقة حاليًا من قبل المشرف.',
   'student-chat-banned': 'تم حظرك من الدردشة. تواصل مع المشرف إذا كنت تعتقد أن ذلك حدث بالخطأ.',
+  'student-chat-muted': 'تم كتمك لمدة 24 ساعة بسبب مخالفة، تواصل مع قسم الدعم إذا كنت تحتاج إلى توضيح.',
+  'support-role-inactive': 'تم سحب صلاحية قسم الدعم لهذا الحساب.',
+  'student-profile-load-failed': 'تعذر تحميل بيانات الطالب.',
+  'student-lookup-failed': 'تعذر التحقق من بيانات الطالب في قاعدة البيانات. أبلغ الإدارة الفنية.',
+  'chat-status-failed': 'تعذر التحقق من حالة الدردشة في قاعدة البيانات. أعد المحاولة لاحقًا.',
+  'student-year-mismatch': 'السنة الدراسية للحساب لا تطابق سنة الدردشة المحددة.',
+  'mute-details-required': 'اكتب سبب الكتم.',
+  'chat-mute-save-failed': 'تعذر كتم الطالب.',
+  'cannot-mute-self': 'لا يمكن كتم حسابك.',
+  'cannot-mute-support-staff': 'لا يمكن كتم حساب دعم آخر.',
+  'student-permanently-banned': 'الطالب محظور حظرًا دائمًا من المشرف.',
   'chat-settings-not-configured': 'الدردشة غير مفعّلة بعد. يرجى إبلاغ المشرف.',
   'chat-service-not-configured': 'تعذر الاتصال بخدمة الدردشة. يرجى المحاولة لاحقًا.',
   'student-credentials-invalid': 'انتهت جلسة الطالب. سجّل الخروج ثم ادخل مجددًا.',
@@ -62,6 +84,11 @@ const requestErrorMessages: Record<string, string> = {
   'message-edit-window-expired': 'انتهت مهلة تعديل الرسالة؛ يمكن تعديلها خلال أول 15 دقيقة من إرسالها فقط.',
   'message-delete-failed': 'تعذر حذف الرسالة.',
   'message-not-found': 'لم تعد الرسالة موجودة.',
+  'chat-http-404': 'مسار الدردشة غير متاح مؤقتًا. تمت إعادة المحاولة؛ حدّث الصفحة أو أعد تشغيل خادم التطوير.',
+  'chat-http-502': 'خادم التطبيق غير متاح مؤقتًا. أعد المحاولة بعد قليل.',
+  'chat-http-503': 'خدمة الدردشة غير متاحة مؤقتًا. أعد المحاولة بعد قليل.',
+  'chat-http-504': 'انتهت مهلة استجابة خادم الدردشة. أعد المحاولة.',
+  'chat-invalid-response': 'وصل رد غير صالح من خادم الدردشة. أعد المحاولة أو أبلغ الإدارة الفنية.',
 };
 
 const formatSize = (size: number) => size < 1024 * 1024
@@ -131,6 +158,7 @@ function ChatAttachment({
           action: 'get-attachment',
           studentId,
           password,
+          studentYear: message.student_year,
           messageId: message.id,
         }),
       });
@@ -157,7 +185,7 @@ function ChatAttachment({
     } finally {
       setLoading(false);
     }
-  }, [message.attachment_name, message.attachment_type, message.id, password, studentId]);
+  }, [message.attachment_name, message.attachment_type, message.id, message.student_year, password, studentId]);
 
   useEffect(() => {
     if (isImage) void openAttachment();
@@ -190,12 +218,18 @@ function ChatAttachment({
 
 export default function StudentChat({
   studentId,
+  studentName,
   password,
   studentYear,
+  supportMode = false,
   selectedMessageId = '',
   onIncomingMessage,
 }: StudentChatProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [selectedYear, setSelectedYear] = useState<'أولى' | 'ثانية'>(studentYear || 'أولى');
+  const [selectedStudentProfile, setSelectedStudentProfile] = useState<ChatStudentProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState('');
   const [draft, setDraft] = useState('');
   const [attachment, setAttachment] = useState<File | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState('');
@@ -211,6 +245,7 @@ export default function StudentChat({
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadingRef = useRef(false);
+  const messageRequestSequenceRef = useRef(0);
   const messagesByIdRef = useRef(new Map<string, ChatMessage>());
   const deletedMessageIdsRef = useRef(new Set<string>());
   const readMessageIdsRef = useRef(new Set<string>());
@@ -218,20 +253,67 @@ export default function StudentChat({
   const readFlushTimerRef = useRef<number | null>(null);
   const lastScrolledMessageIdRef = useRef('');
   const knownMessageIdsRef = useRef<Set<string> | null>(null);
+  const messageCursorRef = useRef('');
+  const loadedYearRef = useRef('');
+  const activeYear = supportMode ? selectedYear : studentYear;
   messagesByIdRef.current = new Map(messages.map((message) => [message.id, message]));
+
+  useEffect(() => {
+    if (!supportMode && studentYear) setSelectedYear(studentYear);
+  }, [studentYear, supportMode]);
+
+  useEffect(() => {
+    if (!supportMode) return;
+    let cancelled = false;
+    void fetch('/api/student-chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({
+        action: 'support-chat-opened',
+        studentId,
+        password,
+        studentYear: activeYear,
+      }),
+    }).then(async (response) => {
+      const result = await response.json() as { success?: boolean; error?: string };
+      if (!response.ok || !result.success) {
+        throw new Error(requestErrorMessages[result.error ?? ''] ?? 'تعذر تسجيل فتح دردشة الدعم.');
+      }
+    }).catch((cause: unknown) => {
+      if (!cancelled) {
+        setError(cause instanceof Error ? cause.message : 'تعذر تسجيل فتح دردشة الدعم.');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [activeYear, password, studentId, supportMode]);
 
   const loadMessages = useCallback(async (showLoading = false) => {
     if (loadingRef.current) return;
     loadingRef.current = true;
+    const requestSequence = messageRequestSequenceRef.current + 1;
+    messageRequestSequenceRef.current = requestSequence;
     if (showLoading) setLoading(true);
     try {
       const response = await fetch('/api/student-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
-        body: JSON.stringify({ action: 'student-messages', studentId, password }),
+        body: JSON.stringify({
+          action: 'student-messages',
+          studentId,
+          password,
+          studentYear: activeYear,
+          after: messageCursorRef.current || undefined,
+        }),
       });
-      const result = await response.json() as { success?: boolean; error?: string; messages?: ChatMessage[] };
+      const result = await response.json() as {
+        success?: boolean;
+        error?: string;
+        messages?: ChatMessage[];
+        cursor?: string;
+      };
+      if (requestSequence !== messageRequestSequenceRef.current) return;
       if (!response.ok || !result.success) {
         setError(requestErrorMessages[result.error ?? ''] ?? 'تعذر تحميل الدردشة.');
         return;
@@ -244,29 +326,75 @@ export default function StudentChat({
           .map((item) => item.id);
         if (receivedNewMessageIds.length) onIncomingMessage?.(receivedNewMessageIds);
       }
-      knownMessageIdsRef.current = new Set(loadedMessages.map((item) => item.id));
+      knownMessageIdsRef.current = new Set([
+        ...(knownMessageIds ?? []),
+        ...loadedMessages.map((item) => item.id),
+      ]);
+      if (result.cursor) messageCursorRef.current = result.cursor;
       setMessages((current) => {
         const pendingMessages = current.filter((item) => item.pending && !loadedMessages.some((loaded) =>
           loaded.student_id === item.student_id
           && loaded.message === item.message
           && loaded.attachment_name === item.attachment_name
         ));
-        return [...loadedMessages, ...pendingMessages];
+        const retainedMessages = current.filter((item) => !item.pending || pendingMessages.includes(item));
+        const mergedMessages = new Map(
+          (knownMessageIds ? retainedMessages : []).map((item) => [item.id, item])
+        );
+        loadedMessages.forEach((item) => mergedMessages.set(item.id, item));
+        pendingMessages.forEach((item) => mergedMessages.set(item.id, item));
+        return [...mergedMessages.values()]
+          .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at))
+          .slice(-200);
       });
       setError('');
     } catch {
-      setError('تعذر الاتصال بالخادم لتحميل الدردشة.');
+      if (requestSequence === messageRequestSequenceRef.current) setError('تعذر الاتصال بالخادم لتحميل الدردشة.');
     } finally {
-      loadingRef.current = false;
-      if (showLoading) setLoading(false);
+      if (requestSequence === messageRequestSequenceRef.current) {
+        loadingRef.current = false;
+        if (showLoading) setLoading(false);
+      }
     }
-  }, [onIncomingMessage, studentId, password]);
+  }, [activeYear, onIncomingMessage, studentId, password]);
 
   useEffect(() => {
-    void loadMessages(true);
-    const interval = window.setInterval(() => void loadMessages(), 5000);
-    return () => window.clearInterval(interval);
-  }, [loadMessages]);
+    if (loadedYearRef.current !== activeYear) {
+      loadedYearRef.current = activeYear;
+      messageCursorRef.current = '';
+      knownMessageIdsRef.current = null;
+    }
+    let cancelled = false;
+    let timer = 0;
+    let polling = false;
+    const poll = async (showLoading = false) => {
+      if (polling) return;
+      polling = true;
+      try {
+        if (document.visibilityState === 'visible') await loadMessages(showLoading);
+      } finally {
+        polling = false;
+        if (!cancelled) {
+          timer = window.setTimeout(
+            () => void poll(),
+            document.visibilityState === 'visible' ? 2500 : 15000
+          );
+        }
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'visible' || polling) return;
+      window.clearTimeout(timer);
+      void poll();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    void poll(true);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [activeYear, loadMessages]);
 
   useEffect(() => {
     endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -302,7 +430,7 @@ export default function StudentChat({
           void fetch('/api/student-chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'mark-read', studentId, password, messageIds }),
+            body: JSON.stringify({ action: 'mark-read', studentId, password, studentYear: activeYear, messageIds }),
           }).then(async (response) => {
             if (!response.ok) throw new Error('chat-read-receipts-unavailable');
           }).catch(() => {
@@ -315,7 +443,7 @@ export default function StudentChat({
     return () => {
       observer.disconnect();
     };
-  }, [loading, messages.length, password, studentId]);
+  }, [activeYear, loading, messages.length, password, studentId]);
 
   useEffect(() => () => {
     if (readFlushTimerRef.current !== null) window.clearTimeout(readFlushTimerRef.current);
@@ -368,8 +496,8 @@ export default function StudentChat({
     const optimisticMessage: ChatMessage = {
       id: optimisticId,
       student_id: studentId,
-      student_name: 'أنت',
-      student_year: studentYear,
+      student_name: supportMode ? studentName : 'أنت',
+      student_year: activeYear,
       message,
       created_at: new Date().toISOString(),
       attachment_name: selectedFile?.name ?? null,
@@ -390,28 +518,50 @@ export default function StudentChat({
       form.set('action', 'send-message');
       form.set('studentId', studentId);
       form.set('password', password);
+      form.set('studentYear', activeYear);
       form.set('message', message);
       if (selectedFile) form.set('file', selectedFile);
 
-      const response = await fetch('/api/student-chat', { method: 'POST', body: form });
-      const result = await response.json() as { success?: boolean; error?: string; message?: ChatMessage };
+      const sendRequest = () => fetch('/api/student-chat', {
+        method: 'POST',
+        body: form,
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      let response = await sendRequest();
+      for (const retryDelay of [500, 1200, 2500]) {
+        if (response.status !== 404) break;
+        await new Promise((resolve) => window.setTimeout(resolve, retryDelay));
+        response = await sendRequest();
+      }
+      let result: { success?: boolean; error?: string; message?: ChatMessage; reason?: string | null };
+      try {
+        result = await response.json() as typeof result;
+      } catch {
+        throw new Error(response.ok ? 'chat-invalid-response' : `chat-http-${response.status}`);
+      }
       const sentMessage = result.message;
       if (!response.ok || !result.success || !sentMessage) {
         setMessages((current) => current.filter((item) => item.id !== optimisticId));
         setDraft(message);
         if (selectedFile) setAttachment(selectedFile);
-        setError(requestErrorMessages[result.error ?? ''] ?? 'تعذر إرسال الرسالة.');
+        const errorMessage = requestErrorMessages[result.error ?? ''] ?? 'تعذر إرسال الرسالة.';
+        setError(result.error === 'student-chat-muted' && result.reason
+          ? `${errorMessage} السبب: ${result.reason}`
+          : errorMessage);
         return;
       }
       setMessages((current) => [
         ...current.filter((item) => item.id !== optimisticId && item.id !== sentMessage.id),
         sentMessage,
       ].slice(-200));
-    } catch {
+    } catch (cause) {
       setMessages((current) => current.filter((item) => item.id !== optimisticId));
       setDraft(message);
       if (selectedFile) setAttachment(selectedFile);
-      setError('تعذر الاتصال بالخادم لإرسال الرسالة.');
+      setError(cause instanceof Error && requestErrorMessages[cause.message]
+        ? requestErrorMessages[cause.message]
+        : 'تعذر الاتصال بالخادم لإرسال الرسالة. تأكد من اتصالك بالإنترنت ثم أعد المحاولة.');
     } finally {
       setSending(false);
     }
@@ -429,7 +579,7 @@ export default function StudentChat({
       const response = await fetch('/api/student-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'edit-message', studentId, password, messageId: message.id, message: nextText }),
+        body: JSON.stringify({ action: 'edit-message', studentId, password, studentYear: activeYear, messageId: message.id, message: nextText }),
       });
       const result = await response.json() as { success?: boolean; error?: string; message?: ChatMessage };
       const updatedMessage = result.message;
@@ -463,7 +613,7 @@ export default function StudentChat({
       const response = await fetch('/api/student-chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delete-message', studentId, password, messageId: message.id }),
+        body: JSON.stringify({ action: 'delete-message', studentId, password, studentYear: activeYear, messageId: message.id }),
       });
       const result = await response.json() as { success?: boolean; error?: string };
       if (!response.ok || !result.success) {
@@ -487,6 +637,69 @@ export default function StudentChat({
     }
   };
 
+  const loadStudentProfile = async (targetStudentId: string) => {
+    if (!supportMode || profileLoading) return;
+    setProfileLoading(true);
+    setProfileError('');
+    setSelectedStudentProfile(null);
+    try {
+      const response = await fetch('/api/student-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          action: 'support-student-profile',
+          studentId,
+          password,
+          targetStudentId,
+          studentYear: activeYear,
+        }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string; student?: ChatStudentProfile };
+      if (!response.ok || !result.success || !result.student) {
+        setProfileError(requestErrorMessages[result.error ?? ''] ?? 'تعذر تحميل بيانات الطالب.');
+        return;
+      }
+      setSelectedStudentProfile(result.student);
+    } catch {
+      setProfileError('تعذر الاتصال بالخادم لتحميل بيانات الطالب.');
+    } finally {
+      setProfileLoading(false);
+    }
+  };
+
+  const muteStudent = async (targetStudentId: string) => {
+    const reason = window.prompt('اكتب سبب كتم الطالب لمدة 24 ساعة:')?.trim();
+    if (!reason) return;
+    setSavingMessageId(targetStudentId);
+    setError('');
+    try {
+      const response = await fetch('/api/student-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          action: 'support-mute-student',
+          studentId,
+          password,
+          targetStudentId,
+          studentYear: activeYear,
+          reason,
+        }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string };
+      if (!response.ok || !result.success) {
+        setError(requestErrorMessages[result.error ?? ''] ?? 'تعذر كتم الطالب.');
+        return;
+      }
+      setNotice('تم كتم الطالب لمدة 24 ساعة وتسجيل السبب.');
+    } catch {
+      setError('تعذر الاتصال بالخادم لكتم الطالب.');
+    } finally {
+      setSavingMessageId('');
+    }
+  };
+
   const canEditMessage = (message: ChatMessage) => {
     const sentAt = Date.parse(message.created_at);
     return Number.isFinite(sentAt) && Date.now() - sentAt <= messageEditWindowMs;
@@ -500,7 +713,28 @@ export default function StudentChat({
         </div>
         <div>
           <h2>دردشة الطلاب</h2>
-          <p>دردشة السنة {studentYear || 'الدراسية'} — الرسائل والمرفقات تُحذف تلقائيًا بعد 48 ساعة.</p>
+          <p>دردشة السنة {activeYear || 'الدراسية'} — الرسائل والمرفقات تُحذف تلقائيًا بعد 48 ساعة.</p>
+          {supportMode && (
+            <label className="chat-support-year-picker">
+              <span>عرض دردشة:</span>
+              <select value={selectedYear} onChange={(event) => {
+                const year = event.currentTarget.value;
+                if (year === 'أولى' || year === 'ثانية') {
+                  messageRequestSequenceRef.current += 1;
+                  loadingRef.current = false;
+                  setSelectedYear(year);
+                  setMessages([]);
+                  setLoading(true);
+                  setError('');
+                  knownMessageIdsRef.current = null;
+                  readMessageIdsRef.current.clear();
+                }
+              }}>
+                <option value="أولى">السنة الأولى</option>
+                <option value="ثانية">السنة الثانية</option>
+              </select>
+            </label>
+          )}
         </div>
         <span className="student-chat-online"><i /> مباشرة</span>
       </header>
@@ -513,10 +747,11 @@ export default function StudentChat({
             <div className="chat-loading"><span className="chat-spinner" /> جارٍ تحميل المحادثة...</div>
           ) : messages.length ? messages.map((item) => {
             const isOwnMessage = item.student_id === studentId;
+            const displayName = supportMode && isOwnMessage ? studentName : item.student_name;
             const isEditable = canEditMessage(item);
             return (
               <article
-                className={`chat-message-row ${isOwnMessage ? 'own' : ''}`}
+                className={`chat-message-row ${isOwnMessage ? 'own' : ''} ${item.is_support_staff ? 'support-staff-message' : ''}`}
                 data-chat-message-id={item.id}
                 key={item.id}
               >
@@ -527,7 +762,21 @@ export default function StudentChat({
                 </span>
                 <div className={`chat-bubble ${isOwnMessage ? 'own' : ''}`}>
                   <div className="chat-message-meta">
-                    <strong>{isOwnMessage ? 'أنت' : item.student_name}</strong>
+                    <strong className={item.is_support_staff ? 'chat-support-name' : ''}>
+                      {supportMode ? (
+                        <button
+                          type="button"
+                          className="chat-student-profile-trigger"
+                          onClick={() => void loadStudentProfile(item.student_id)}
+                          aria-label={`عرض بيانات ${displayName}`}
+                        >
+                          {displayName}
+                        </button>
+                      ) : isOwnMessage ? 'أنت' : item.student_name}
+                      {item.is_support_staff && (
+                        <span className="chat-support-badge"><Gavel size={13} aria-hidden="true" /> قسم دعم</span>
+                      )}
+                    </strong>
                     <time dateTime={item.created_at}>
                       {new Date(item.created_at).toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit' })}
                                   {!item.pending && isOwnMessage && !item.edited_at && ' · تم الإرسال'}
@@ -575,6 +824,16 @@ export default function StudentChat({
                         <Trash2 size={14} />
                       </button>
                     </div>
+                  )}
+                  {supportMode && !isOwnMessage && !item.is_support_staff && !item.pending && (
+                    <button
+                      type="button"
+                      className="chat-support-mute-button"
+                      onClick={() => void muteStudent(item.student_id)}
+                      disabled={Boolean(savingMessageId)}
+                    >
+                      {savingMessageId === item.student_id ? 'جارٍ الكتم...' : 'كتم 24 ساعة'}
+                    </button>
                   )}
                   {isOwnMessage && !item.pending && (
                     <span className="chat-viewer-count" title="عدد الطلاب الذين شاهدوا الرسالة داخل نافذة الدردشة">
@@ -647,6 +906,40 @@ export default function StudentChat({
           </div>
         </form>
       </div>
+      {supportMode && (profileLoading || profileError || selectedStudentProfile) && (
+        <div className="chat-student-profile-backdrop" role="presentation" onClick={() => {
+          if (!profileLoading) {
+            setSelectedStudentProfile(null);
+            setProfileError('');
+          }
+        }}>
+          <section
+            className="chat-student-profile-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="بيانات الطالب"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button type="button" className="chat-student-profile-close" onClick={() => {
+              setSelectedStudentProfile(null);
+              setProfileError('');
+            }} aria-label="إغلاق" disabled={profileLoading}>×</button>
+            {profileLoading ? <p>جارٍ تحميل بيانات الطالب...</p> : profileError ? (
+              <p className="chat-alert" role="alert">{profileError}</p>
+            ) : selectedStudentProfile && (
+              <>
+                {selectedStudentProfile.avatarUrl
+                  ? <Image className="chat-student-profile-avatar" src={selectedStudentProfile.avatarUrl} width={110} height={110} unoptimized alt={`صورة ${selectedStudentProfile.studentName}`} />
+                  : <div className="chat-student-profile-avatar-placeholder">{selectedStudentProfile.studentName.charAt(0)}</div>}
+                <h3>{selectedStudentProfile.studentName}</h3>
+                <p>الرقم الجامعي: <strong>{selectedStudentProfile.studentId}</strong></p>
+                <p>رقم الموبايل: <strong>{selectedStudentProfile.phone || 'غير متوفر'}</strong></p>
+                <p>السنة: <strong>{selectedStudentProfile.studentYear}</strong></p>
+              </>
+            )}
+          </section>
+        </div>
+      )}
     </section>
   );
 }
