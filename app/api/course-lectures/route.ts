@@ -109,13 +109,13 @@ const authenticateStudent = async (
   password: string
 ) => {
   if (!studentId || !password) return { student: null, error: 'student-credentials-required' };
-  const { data, error } = await supabase.from('students').select('*')
+  const { data, error } = await supabase.from('students').select('"كلمة السر", "السنه الدراسية", "الفئة"')
     .eq('الرقم الجامعي', studentId).maybeSingle();
   if (error) {
     console.error('COURSE_LECTURE_STUDENT_LOOKUP_FAILED:', error.message);
     return { student: null, error: 'student-verification-failed' };
   }
-  if (!data || clean(data['كلمة السر'] ?? data.password ?? data.pass) !== password) {
+  if (!data || clean(data['كلمة السر']) !== password) {
     return { student: null, error: 'student-credentials-invalid' };
   }
   return { student: data as Record<string, unknown>, error: null };

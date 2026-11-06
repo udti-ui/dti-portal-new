@@ -35,29 +35,29 @@ export async function POST(request: Request) {
     }
 
     stage = 'find-student';
-    const { data: students, error: studentsError } = await supabase.from('students').select('*');
-    if (studentsError) {
-      console.error('RESET_PASSWORD_ERROR:', { stage, code: studentsError.code, message: studentsError.message, details: studentsError.details, hint: studentsError.hint });
-      return jsonError('student-query-failed', 500, studentsError.message);
+    const studentColumns = '"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "البريد الإلكتروني", "رقم الهاتف"';
+    const idCandidates = [...new Set([identifier, normalizedIdentifier].filter(Boolean))];
+    const lookups = await Promise.all([
+      ...idCandidates.map((candidate) => supabase.from('students').select(studentColumns)
+        .eq('الرقم الجامعي', candidate).maybeSingle()),
+      ...(identifier.includes('@')
+        ? [supabase.from('students').select(studentColumns)
+          .ilike('البريد الإلكتروني', identifier.replace(/[\\%_]/g, '\\$&')).maybeSingle()]
+        : /^\+?[\d\s()-]+$/.test(identifier)
+          ? [supabase.from('students').select(studentColumns).eq('رقم الهاتف', identifier).maybeSingle()]
+          : []),
+    ]);
+    const lookupError = lookups.find((lookup) => lookup.error)?.error;
+    if (lookupError) {
+      console.error('RESET_PASSWORD_ERROR:', { stage, code: lookupError.code, message: lookupError.message, details: lookupError.details, hint: lookupError.hint });
+      return jsonError('student-query-failed', 500, lookupError.message);
     }
-    const student = (Array.isArray(students) ? students : []).find((row) => {
-      const record = row as Record<string, unknown>;
-      return [record['الرقم الجامعي'], record.student_id, record.studentId]
-        .some((value) => normalizeStudentIdentifier(value) === normalizedIdentifier)
-        || [record['رقم الهاتف'], record.phone].some((value) => normalize(value) === identifier)
-        || [record['البريد الإلكتروني'], record.email].some((value) => normalize(value).toLowerCase() === identifier.toLowerCase());
-    }) as Record<string, unknown> | undefined;
+    const student = lookups.find((lookup) => lookup.data)?.data as Record<string, unknown> | undefined;
     if (!student) return jsonError('student-not-found', 404, 'لم يتم العثور على الطالب أو البريد الإلكتروني.');
 
-    const studentIdKey = student['الرقم الجامعي'] !== undefined
-      ? 'الرقم الجامعي'
-      : student.student_id !== undefined
-        ? 'student_id'
-        : student.studentId !== undefined
-          ? 'studentId'
-          : 'id';
-    const studentId = normalize(student['الرقم الجامعي'] ?? student.student_id ?? student.studentId ?? student.id);
-    const email = normalize(student['البريد الإلكتروني'] ?? student.email);
+    const studentIdKey = 'الرقم الجامعي';
+    const studentId = normalize(student['الرقم الجامعي']);
+    const email = normalize(student['البريد الإلكتروني']);
     if (!email) return jsonError('student-email-missing', 400, 'لا يوجد بريد إلكتروني مسجل لهذا الطالب.');
     stage = 'read-reset-code';
     const { data: resetRows, error: resetError } = await supabase

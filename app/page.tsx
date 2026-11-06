@@ -2943,7 +2943,7 @@ export default function Home() {
             )}
 
             {activeTab === 'grades' && (
-              <div className="tab-content active">
+              <div className="tab-content active student-grades-panel">
                 {teacherGradesLoading ? (
                   <div className="no-data" role="status" aria-live="polite">
                     <span

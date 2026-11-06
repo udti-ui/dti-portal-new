@@ -30,13 +30,6 @@ const hashPassword = (password: string) => {
   const salt = randomBytes(16).toString('hex');
   return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`;
 };
-const normalizeYear = (value: unknown): 'أولى' | 'ثانية' | '' => {
-  const year = clean(value).replace(/\s+/g, '').toLocaleLowerCase();
-  if (['1', '١'].includes(year) || year.includes('اولى') || year.includes('أولى') || year.includes('first')) return 'أولى';
-  if (['2', '٢'].includes(year) || year.includes('ثانية') || year.includes('second')) return 'ثانية';
-  return '';
-};
-
 const verifySupervisor = async (
   supabase: NonNullable<ReturnType<typeof createSupabaseAdminClient>>,
   username: string,
@@ -229,16 +222,14 @@ export async function POST(request: Request) {
       if (previousClass?.data && (previousClass.data.name !== name || previousClass.data.student_year !== studentYear)) {
         const existingClass = previousClass.data;
         const [{ data: students, error: studentsError }, { data: scheduledItems, error: scheduleError }] = await Promise.all([
-          supabase.from('students').select('*'),
+          supabase.from('students').select('"الرقم الجامعي"')
+            .eq('الفئة', existingClass.name)
+            .eq('السنه الدراسية', existingClass.student_year)
+            .limit(1),
           supabase.from('schedule_items').select('id').eq('group_name', existingClass.name).eq('student_year', existingClass.student_year),
         ]);
         if (studentsError || scheduleError) return databaseErrorResponse('class-save-failed', studentsError ?? scheduleError);
-        const hasStudents = (students ?? []).some((row) => {
-          const student = row as Record<string, unknown>;
-          const className = clean(student['الفئة'] ?? student.class ?? student.class_name ?? student['اسم الفئة']).replace(/^فئة\s*/, '');
-          const year = clean(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
-          return className === existingClass.name && normalizeYear(year) === existingClass.student_year;
-        });
+        const hasStudents = (students ?? []).length > 0;
         if (hasStudents || (scheduledItems ?? []).length > 0) {
           return errorResponse('class-in-use', 409);
         }
@@ -259,15 +250,12 @@ export async function POST(request: Request) {
         .select('name, student_year').eq('id', id).maybeSingle();
       if (lookupError) return databaseErrorResponse('class-lookup-failed', lookupError);
       if (!academicClass) return errorResponse('class-not-found', 404);
-      const { data: students, error: studentsError } = await supabase.from('students').select('*');
+      const { data: students, error: studentsError } = await supabase.from('students').select('"الرقم الجامعي"')
+        .eq('الفئة', academicClass.name)
+        .eq('السنه الدراسية', academicClass.student_year)
+        .limit(1);
       if (studentsError) return databaseErrorResponse('class-delete-failed', studentsError);
-      const hasStudents = (students ?? []).some((row) => {
-        const student = row as Record<string, unknown>;
-        const className = clean(student['الفئة'] ?? student.class ?? student.class_name ?? student['اسم الفئة']).replace(/^فئة\s*/, '');
-        const year = clean(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
-        return className === academicClass.name && normalizeYear(year) === academicClass.student_year;
-      });
-      if (hasStudents) return errorResponse('class-in-use', 409);
+      if ((students ?? []).length) return errorResponse('class-in-use', 409);
       const { data: scheduledItems, error: scheduleError } = await supabase.from('schedule_items').select('id')
         .eq('group_name', academicClass.name).eq('student_year', academicClass.student_year);
       if (scheduleError) return databaseErrorResponse('class-delete-failed', scheduleError);

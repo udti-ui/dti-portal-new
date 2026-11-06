@@ -9136,6 +9136,24 @@ html[data-theme='dark'] .student-dashboard-container .tab-content {
   background: linear-gradient(120deg, #25241e, #1b1d22 62%, #292820) !important;
 }
 
+html[data-theme='dark'] .student-dashboard-container .student-grades-panel {
+  color: #fff;
+}
+
+html[data-theme='dark'] .student-dashboard-container .student-grades-panel table {
+  background: #1b1d22;
+}
+
+html[data-theme='dark'] .student-dashboard-container .student-grades-panel th,
+html[data-theme='dark'] .student-dashboard-container .student-grades-panel td {
+  color: #fff !important;
+  border-color: #494538;
+}
+
+html[data-theme='dark'] .student-dashboard-container .student-grades-panel td {
+  background: #1b1d22;
+}
+
 html[data-theme='dark'] .student-dashboard-title h1,
 html[data-theme='dark'] .student-class-manager .class-change-title,
 html[data-theme='dark'] .student-profile-grid .info-item,

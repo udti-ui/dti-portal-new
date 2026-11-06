@@ -33,14 +33,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'student-credentials-required' }, { status: 400 });
     }
 
-    const { data: student, error: studentError } = await supabase.from('students').select('*')
+    const { data: student, error: studentError } = await supabase.from('students').select('"كلمة السر", "السنه الدراسية"')
       .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
-    if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+    if (!student || clean(student['كلمة السر']) !== password) {
       return NextResponse.json({ success: false, error: 'student-credentials-invalid' }, { status: 401 });
     }
 
-    const studentYear = normalizeYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
+    const studentYear = normalizeYear(student['السنه الدراسية']);
     if (!studentYear) return NextResponse.json({ success: true, grades: [] });
 
     const { data: subjects, error: subjectsError } = await supabase.from('academic_subjects')

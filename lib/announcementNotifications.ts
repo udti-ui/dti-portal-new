@@ -27,24 +27,31 @@ export async function notifyStudentsAboutAnnouncement(
   const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
   if (!botToken) return { sent: 0, failed: 0, status: 'missing_bot_token' };
 
-  const { data, error } = await supabase.from('students').select('*');
-  if (error) {
-    console.error('ANNOUNCEMENT_TELEGRAM_RECIPIENTS_LOOKUP_FAILED:', error.message);
-    return { sent: 0, failed: 1, status: 'sent' };
+  const chatIds = new Set<string>();
+  for (let offset = 0; offset < 100000; offset += 500) {
+    let query = supabase.from('students')
+      .select('telegram_chat_id, "السنه الدراسية"')
+      .eq('telegram_notifications_enabled', true)
+      .not('telegram_chat_id', 'is', null)
+      .order('الرقم الجامعي', { ascending: true })
+      .range(offset, offset + 499);
+    if (announcement.student_year) query = query.eq('السنه الدراسية', announcement.student_year);
+    const { data, error } = await query;
+    if (error) {
+      console.error('ANNOUNCEMENT_TELEGRAM_RECIPIENTS_LOOKUP_FAILED:', error.message);
+      return { sent: 0, failed: 1, status: 'sent' };
+    }
+
+    for (const row of data ?? []) {
+      const student = row as Record<string, unknown>;
+      const year = normalizeStudentYear(student['السنه الدراسية']);
+      const chatId = String(student.telegram_chat_id ?? '').trim();
+      if ((!announcement.student_year || year === announcement.student_year) && chatId) chatIds.add(chatId);
+    }
+    if ((data ?? []).length < 500) break;
   }
 
-  const chatIds = [...new Set((data ?? []).flatMap((row) => {
-    const student = row as Record<string, unknown>;
-    const year = normalizeStudentYear(
-      student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year
-    );
-    const enabled = student.telegram_notifications_enabled ?? student['telegram_notifications_enabled'];
-    const enabledValue = enabled === true || ['true', '1', 'yes'].includes(String(enabled ?? '').toLowerCase());
-    const chatId = String(student.telegram_chat_id ?? student['telegram_chat_id'] ?? '').trim();
-    return (!announcement.student_year || year === announcement.student_year) && enabledValue && chatId ? [chatId] : [];
-  }))];
-
-  if (!chatIds.length) return { sent: 0, failed: 0, status: 'no_subscribers' };
+  if (!chatIds.size) return { sent: 0, failed: 0, status: 'no_subscribers' };
 
   const author = announcement.author_type === 'admin'
     ? 'الإدارة'
@@ -64,8 +71,9 @@ export async function notifyStudentsAboutAnnouncement(
   let sent = 0;
   let failed = 0;
 
-  for (let offset = 0; offset < chatIds.length; offset += 20) {
-    const batch = chatIds.slice(offset, offset + 20);
+  const recipients = [...chatIds];
+  for (let offset = 0; offset < recipients.length; offset += 20) {
+    const batch = recipients.slice(offset, offset + 20);
     const results = await Promise.all(batch.map(async (chatId) => {
       try {
         const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {

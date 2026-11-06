@@ -47,7 +47,7 @@ export async function GET(request: Request) {
     return errorResponse('student-id-change-status-failed', 500, error.message);
   }
 
-  const { data: student, error: studentError } = await supabase.from('students').select('*')
+  const { data: student, error: studentError } = await supabase.from('students').select('"السنه الدراسية"')
     .eq('الرقم الجامعي', studentId).maybeSingle();
   if (studentError) {
     console.error('STUDENT_ID_CHANGE_ERROR:', studentError);
@@ -86,18 +86,17 @@ export async function POST(request: Request) {
       return errorResponse('confirmation-required', 400, 'يجب تأكيد مطابقة الرقم للقوائم المنشورة وتحمل مسؤولية إدخاله.');
     }
 
-    const { data: students, error: studentsError } = await supabase.from('students').select('*');
+    const { data: student, error: studentsError } = await supabase.from('students')
+      .select('"الرقم الجامعي", "السنه الدراسية"')
+      .eq('الرقم الجامعي', currentStudentId)
+      .maybeSingle();
     if (studentsError) {
       console.error('STUDENT_ID_CHANGE_ERROR:', studentsError);
       return errorResponse('student-query-failed', 500, studentsError.message);
     }
-
-    const studentRows = (Array.isArray(students) ? students : []) as Record<string, unknown>[];
-    const student = studentRows.find((row) => normalizeStudentIdentifier(
-      row['الرقم الجامعي'] ?? row.student_id ?? row.studentId ?? row.id
-    ) === currentStudentId);
     if (!student) return errorResponse('student-not-found', 404, 'لم يتم العثور على حساب الطالب الحالي.');
-    const studentYear = normalizeStudentYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.student_year ?? student.year);
+    const studentRecord = student as Record<string, unknown>;
+    const studentYear = normalizeStudentYear(studentRecord['السنه الدراسية']);
     if (studentYear) {
       const lock = await getLockStatus(studentYear);
       if (lock.error) {
@@ -109,9 +108,14 @@ export async function POST(request: Request) {
       }
     }
 
-    const duplicateStudent = studentRows.find((row) => normalizeStudentIdentifier(
-      row['الرقم الجامعي'] ?? row.student_id ?? row.studentId ?? row.id
-    ) === newStudentId);
+    const { data: duplicateStudent, error: duplicateError } = await supabase.from('students')
+      .select('"الرقم الجامعي"')
+      .eq('الرقم الجامعي', newStudentId)
+      .maybeSingle();
+    if (duplicateError) {
+      console.error('STUDENT_ID_CHANGE_ERROR:', duplicateError);
+      return errorResponse('student-id-duplicate-check-failed', 500, duplicateError.message);
+    }
     if (duplicateStudent) return errorResponse('student-id-already-used', 409, 'الرقم الجامعي الجديد مرتبط بحساب آخر.');
 
     const { data: existingChange, error: existingChangeError } = await supabase
@@ -136,17 +140,11 @@ export async function POST(request: Request) {
       return errorResponse('student-id-change-record-failed', 500, recordError.message);
     }
 
-    const studentIdKey = student['الرقم الجامعي'] !== undefined
-      ? 'الرقم الجامعي'
-      : student.student_id !== undefined
-        ? 'student_id'
-        : student.studentId !== undefined
-          ? 'studentId'
-          : 'id';
+    const studentIdKey = 'الرقم الجامعي';
     const { error: updateError } = await supabase
       .from('students')
       .update({ 'الرقم الجامعي': newStudentId })
-      .eq(studentIdKey, student[studentIdKey]);
+      .eq(studentIdKey, studentRecord[studentIdKey]);
 
     if (updateError) {
       await supabase.from('student_id_change_requests').delete().eq('student_id', currentStudentId);
@@ -171,7 +169,7 @@ export async function POST(request: Request) {
       for (const updatedTable of updatedRelatedTables) {
         await supabase.from(updatedTable).update({ 'الرقم الجامعي': currentStudentId }).eq('الرقم الجامعي', newStudentId);
       }
-      await supabase.from('students').update({ 'الرقم الجامعي': currentStudentId }).eq(studentIdKey, student[studentIdKey]);
+      await supabase.from('students').update({ 'الرقم الجامعي': currentStudentId }).eq(studentIdKey, studentRecord[studentIdKey]);
       await supabase.from('student_id_change_requests').delete().eq('student_id', currentStudentId);
       console.error('STUDENT_ID_CHANGE_ERROR:', relatedUpdateError);
       return errorResponse('related-records-update-failed', 500, `تعذر تحديث جدول ${tableName}: ${relatedUpdateError.message}`);

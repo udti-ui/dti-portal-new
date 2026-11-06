@@ -26,15 +26,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'missing-class-or-student' }, { status: 400 });
     }
 
-    const { data: student, error: studentError } = await supabase.from('students').select('*')
+    const { data: student, error: studentError } = await supabase.from('students')
+      .select('"كلمة السر", "الفئة", "السنه الدراسية", "اسم الطالب", "البريد الإلكتروني", telegram_notifications_enabled, telegram_chat_id')
       .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
-    if (!student || String(student['كلمة السر'] ?? student.password ?? student.pass ?? '') !== password) {
+    if (!student || String(student['كلمة السر'] ?? '') !== password) {
       return NextResponse.json({ success: false, error: 'student-not-found' }, { status: 404 });
     }
 
     const previousClass = String(student['الفئة'] ?? '').trim();
-    const studentYear = normalizeYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
+    const studentYear = normalizeYear(student['السنه الدراسية']);
     if (!studentYear) return NextResponse.json({ success: false, error: 'student-year-missing' }, { status: 400 });
     const { data: availableClasses, error: classesError } = await supabase.from('student_classes')
       .select('name, capacity').eq('student_year', studentYear);
@@ -43,15 +44,12 @@ export async function POST(request: Request) {
     if (!selectedClass) return NextResponse.json({ success: false, error: 'class-not-available-for-student-year' }, { status: 400 });
 
     if (typeof selectedClass.capacity === 'number') {
-      const { data: students, error: studentsError } = await supabase.from('students').select('*');
+      const { count: occupied, error: studentsError } = await supabase.from('students')
+        .select('"الرقم الجامعي"', { count: 'exact', head: true })
+        .eq('السنه الدراسية', studentYear)
+        .eq('الفئة', selectedClass.name);
       if (studentsError) return NextResponse.json({ success: false, error: 'student-classes-load-failed' }, { status: 500 });
-      const occupied = (students ?? []).filter((row) => {
-        const enrolledStudent = row as Record<string, unknown>;
-        const year = normalizeYear(enrolledStudent['السنه الدراسية'] ?? enrolledStudent['السنة الدراسية'] ?? enrolledStudent.year ?? enrolledStudent.student_year);
-        const className = enrolledStudent['الفئة'] ?? enrolledStudent.class ?? enrolledStudent.class_name ?? enrolledStudent['اسم الفئة'];
-        return year === studentYear && normalizeClass(className) === normalizeClass(selectedClass.name);
-      }).length;
-      if (occupied >= selectedClass.capacity) return NextResponse.json({ success: false, error: 'class-full' }, { status: 400 });
+      if ((occupied ?? 0) >= selectedClass.capacity) return NextResponse.json({ success: false, error: 'class-full' }, { status: 400 });
     }
     const { error: updateError } = await supabase.from('students').update({
       'الفئة': nextClass,
@@ -59,8 +57,8 @@ export async function POST(request: Request) {
     }).eq('الرقم الجامعي', studentId);
     if (updateError) return NextResponse.json({ success: false, error: 'student-update-failed' }, { status: 500 });
 
-    const studentName = String(student['اسم الطالب'] ?? student.student_name ?? student.name ?? 'الطالب');
-    const email = String(student['البريد الإلكتروني'] ?? student.email ?? '').trim();
+    const studentName = String(student['اسم الطالب'] ?? 'الطالب');
+    const email = String(student['البريد الإلكتروني'] ?? '').trim();
     const emailResult = email
       ? await sendEmail({
         to: email,
@@ -77,7 +75,7 @@ export async function POST(request: Request) {
       const telegramMessage = buildStudentTelegramMessage({
         studentName,
         studentId,
-        studentYear: String(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year ?? 'غير محدد'),
+        studentYear: String(student['السنه الدراسية'] ?? 'غير محدد'),
         studentClass: nextClass,
         statusText: `تم تغيير الفئة بنجاح من ${previousClass || 'غير محددة'} إلى ${nextClass}.`,
         title: 'تغيير الفئة',

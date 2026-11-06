@@ -79,9 +79,10 @@ export async function POST(request: Request) {
     }
 
     const { data: student, error: studentError } = await supabase.from('students')
-      .select('*').eq('الرقم الجامعي', studentId).maybeSingle();
+      .select('"الرقم الجامعي", "كلمة السر", "اسم الطالب", "اسم الاب", "الكنية"')
+      .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return errorResponse('student-lookup-failed', 500);
-    if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+    if (!student || clean(student['كلمة السر']) !== password) {
       return errorResponse('student-credentials-invalid', 401);
     }
 

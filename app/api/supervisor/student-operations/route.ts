@@ -138,6 +138,65 @@ export async function POST(request: Request) {
   if (!supabase) return responseError('student-operations-service-not-configured', 503);
 
   try {
+    if (action === 'list-students') {
+      const verification = await verifyFirstDegreeSupervisor(supabase, username, password);
+      if (verification.failed) return responseError('supervisor-lookup-failed', 503);
+      if (!verification.valid) return responseError('first-degree-supervisor-required', 403);
+
+      const requestedPage = Number(body.page);
+      const requestedPageSize = Number(body.pageSize);
+      const page = Number.isSafeInteger(requestedPage) && requestedPage >= 0 && requestedPage <= 100000 ? requestedPage : 0;
+      const pageSize = Number.isSafeInteger(requestedPageSize)
+        ? Math.min(Math.max(requestedPageSize, 10), 100)
+        : 30;
+      const search = clean(body.search, 100).replace(/[,*%()\\"]/g, ' ').trim();
+      const className = clean(body.className, 80);
+      const year = clean(body.year, 40);
+      const section = clean(body.section, 120);
+      const start = page * pageSize;
+      const filters: string[] = [];
+
+      let query = supabase.from('students')
+        .select(
+          '"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "ملاحظة", telegram_chat_id, telegram_notifications_enabled, avatar_url'
+        )
+        .order('الرقم الجامعي', { ascending: true })
+        .range(start, start + pageSize);
+      if (search) {
+        const pattern = `*${search}*`;
+        filters.push(`or(${[
+          `"الرقم الجامعي".ilike.${pattern}`,
+          `"اسم الطالب".ilike.${pattern}`,
+          `"اسم الاب".ilike.${pattern}`,
+          `"الكنية".ilike.${pattern}`,
+          `"الفئة".ilike.${pattern}`,
+          `"القسم".ilike.${pattern}`,
+        ].join(',')})`);
+      }
+      if (className && className !== 'بدون فئة') query = query.eq('الفئة', className);
+      if (className === 'بدون فئة') filters.push('or("الفئة".is.null,"الفئة".eq."")');
+      if (year) query = query.eq('السنه الدراسية', year);
+      if (section) query = query.eq('القسم', section);
+      if (filters.length === 1) query = query.or(filters[0].replace(/^or\(|\)$/g, ''));
+      if (filters.length > 1) query = query.or(`and(${filters.join(',')})`);
+
+      const { data, error } = await query;
+      if (error) {
+        console.error('[student-operations] paginated student list failed:', error.message);
+        return responseError('student-list-failed', 500);
+      }
+      const rows = data ?? [];
+      return NextResponse.json({
+        success: true,
+        students: rows.slice(0, pageSize),
+        hasMore: rows.length > pageSize,
+        page,
+        pageSize,
+      }, {
+        headers: { 'Cache-Control': 'private, no-store' },
+      });
+    }
+
     if (action === 'list-tickets' || action === 'review-ticket') {
       const verification = await verifyFirstDegreeSupervisor(supabase, username, password);
       if (verification.failed) return responseError('supervisor-lookup-failed', 503);
@@ -229,7 +288,8 @@ export async function POST(request: Request) {
 
     if (action === 'select-student') {
       const studentId = clean(body.studentId, 40);
-      const { data, error } = await supabase.from('students').select('*')
+      const { data, error } = await supabase.from('students')
+        .select('"الرقم الجامعي", "السنه الدراسية", "الفئة"')
         .eq('الرقم الجامعي', studentId).limit(1);
       if (error) return responseError('student-detail-failed', 500);
       const row = (data ?? [])[0] as Record<string, unknown> | undefined;
@@ -260,10 +320,11 @@ export async function POST(request: Request) {
     }
 
     if (action === 'my-accounts') {
-      const { data, error } = await supabase.from('students').select('*')
+      const { data, error } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "رقم الهاتف", "السنه الدراسية", supervisor_created_at')
         .eq('created_by_supervisor', username)
         .order('supervisor_created_at', { ascending: false })
-        .limit(1000);
+        .range(0, 999);
       if (error) return responseError('created-student-list-failed', 500);
       const accounts = (data ?? []).map((row) => {
         const record = row as Record<string, unknown>;
@@ -301,7 +362,8 @@ export async function POST(request: Request) {
 
     if (action === 'get-owned-account') {
       const studentId = clean(body.studentId, 40);
-      const { data, error } = await supabase.from('students').select('*')
+      const { data, error } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "telegram_verification_code", "القسم", "الفئة", "السنه الدراسية", supervisor_created_at')
         .eq('الرقم الجامعي', studentId)
         .eq('created_by_supervisor', username)
         .limit(1);
@@ -437,7 +499,8 @@ export async function POST(request: Request) {
 
     if (action === 'delete') {
       const studentId = clean(body.studentId, 40);
-      const { data, error } = await supabase.from('students').select('*')
+      const { data, error } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "رقم الهاتف", "البريد الإلكتروني", "القسم", "الفئة", "السنه الدراسية", "نوع التسجيل", telegram_verification_code, avatar_url, supervisor_created_at')
         .eq('الرقم الجامعي', studentId)
         .eq('created_by_supervisor', username)
         .limit(1);
@@ -464,7 +527,8 @@ export async function POST(request: Request) {
       const studentId = clean(body.studentId, 40);
       const changes = normalizeChanges(body.changes);
       if (!changes) return responseError('invalid-student-changes', 400);
-      const { data, error } = await supabase.from('students').select('*')
+      const { data, error } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "رقم الهاتف", "البريد الإلكتروني", "القسم", "الفئة", "السنه الدراسية", "نوع التسجيل", telegram_verification_code, avatar_url, supervisor_created_at')
         .eq('الرقم الجامعي', studentId)
         .eq('created_by_supervisor', username)
         .limit(1);
@@ -500,7 +564,8 @@ export async function POST(request: Request) {
       const description = clean(body.description, 3000);
       const changes = normalizeChanges(body.changes);
       if (!studentId || description.length < 3 || !changes) return responseError('invalid-student-update-request', 400);
-      const { data: found, error: studentError } = await supabase.from('students').select('*')
+      const { data: found, error: studentError } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "رقم الهاتف", "البريد الإلكتروني", "القسم", "الفئة", "السنه الدراسية", "نوع التسجيل", telegram_verification_code, avatar_url')
         .eq('الرقم الجامعي', studentId).limit(1);
       if (studentError) return responseError('student-detail-failed', 500);
       const row = (found ?? [])[0] as Record<string, unknown> | undefined;

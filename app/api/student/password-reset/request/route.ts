@@ -46,21 +46,25 @@ export async function POST(request: Request) {
     if (!identifier) return jsonError('missing-identifier', 400, 'أدخل البريد الإلكتروني أو الرقم أو الهاتف.');
 
     stage = 'find-student';
-    const studentLookup = await supabase.from('students').select('*');
-    if (studentLookup.error) {
-      console.error('RESET_PASSWORD_ERROR:', studentLookup.error);
-      return jsonError('student-query-failed', 500, getErrorDetails(studentLookup.error));
+    const studentColumns = '"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "البريد الإلكتروني", "رقم الهاتف", telegram_chat_id, telegram_notifications_enabled, "السنه الدراسية", "الفئة"';
+    const idCandidates = [...new Set([identifier, normalizedIdentifier].filter(Boolean))];
+    const lookups = await Promise.all([
+      ...idCandidates.map((candidate) => supabase.from('students').select(studentColumns)
+        .eq('الرقم الجامعي', candidate).maybeSingle()),
+      ...(identifier.includes('@')
+        ? [supabase.from('students').select(studentColumns)
+          .ilike('البريد الإلكتروني', identifier.replace(/[\\%_]/g, '\\$&')).maybeSingle()]
+        : /^\+?[\d\s()-]+$/.test(identifier)
+          ? [supabase.from('students').select(studentColumns).eq('رقم الهاتف', identifier).maybeSingle()]
+          : []),
+    ]);
+    const lookupError = lookups.find((lookup) => lookup.error)?.error;
+    if (lookupError) {
+      console.error('RESET_PASSWORD_ERROR:', lookupError);
+      return jsonError('student-query-failed', 500, getErrorDetails(lookupError));
     }
 
-    const student = (Array.isArray(studentLookup.data) ? studentLookup.data : []).find((row) => {
-      const record = row as Record<string, unknown>;
-      return [record['الرقم الجامعي'], record.student_id, record.studentId, record.id]
-        .some((value) => normalizeStudentIdentifier(value) === normalizedIdentifier)
-        || [record['رقم الهاتف'], record.phone]
-          .some((value) => normalize(value) === identifier)
-        || [record['البريد الإلكتروني'], record.email]
-          .some((value) => normalize(value).toLowerCase() === identifier.toLowerCase());
-    }) as Record<string, unknown> | undefined;
+    const student = lookups.find((lookup) => lookup.data)?.data as Record<string, unknown> | undefined;
 
     if (!student) return jsonError('student-not-found', 404, 'لم يتم العثور على حساب مطابق للبيانات المدخلة.');
 

@@ -22,16 +22,16 @@ export async function POST(request: Request) {
     const password = clean(body.password);
     if (!studentId || !password) return NextResponse.json({ success: false, error: 'student-credentials-required' }, { status: 400 });
 
-    const { data: student, error: studentError } = await supabase.from('students').select('*')
+    const { data: student, error: studentError } = await supabase.from('students').select('"كلمة السر", "السنه الدراسية", "الفئة"')
       .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
-    if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+    if (!student || clean(student['كلمة السر']) !== password) {
       return NextResponse.json({ success: false, error: 'student-credentials-invalid' }, { status: 401 });
     }
 
-    const studentYear = normalizeYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
+    const studentYear = normalizeYear(student['السنه الدراسية']);
     if (!studentYear) return NextResponse.json({ success: true, schedule: [] });
-    const studentGroup = normalizeGroup(student['الفئة'] ?? student.class ?? student.class_name ?? student['اسم الفئة']);
+    const studentGroup = normalizeGroup(student['الفئة']);
     const { data, error } = await supabase.from('schedule_items')
       .select('id, day, start_time, end_time, subject, type, location, group_name, student_year')
       .eq('student_year', studentYear);

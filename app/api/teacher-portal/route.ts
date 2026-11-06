@@ -194,11 +194,11 @@ export async function POST(request: Request) {
       if (!studentId || !password) return errorResponse('student-credentials-required', 400);
       const { data: student, error: studentError } = await supabase
         .from('students')
-        .select('*')
+        .select('"الرقم الجامعي", "كلمة السر", "اسم الطالب", "اسم الاب", "الكنية", "السنه الدراسية"')
         .eq('الرقم الجامعي', studentId)
         .maybeSingle();
       if (studentError) return errorResponse('student-verification-failed', 500);
-      if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+      if (!student || clean(student['كلمة السر']) !== password) {
         return errorResponse('student-credentials-invalid', 401);
       }
 
@@ -385,7 +385,8 @@ export async function POST(request: Request) {
       if (!assignment || !studentId || !componentInfo || typeof score !== 'number' || !Number.isFinite(score) || score < 0) {
         return errorResponse('invalid-grade', 400);
       }
-      const { data: student, error: studentError } = await supabase.from('students').select('*')
+      const { data: student, error: studentError } = await supabase.from('students')
+        .select('"السنه الدراسية"')
         .eq('الرقم الجامعي', studentId).maybeSingle();
       if (studentError) return errorResponse('student-lookup-failed', 500);
       if (!student) return errorResponse('student-not-found', 404);
@@ -463,7 +464,8 @@ export async function POST(request: Request) {
       if (!entries.length) return NextResponse.json({ success: true, grades: [] });
 
       const studentIds = entries.map((entry) => entry.studentId);
-      const { data: matchingStudents, error: studentsError } = await supabase.from('students').select('*')
+      const { data: matchingStudents, error: studentsError } = await supabase.from('students')
+        .select('"الرقم الجامعي", "السنه الدراسية"')
         .in('الرقم الجامعي', studentIds);
       if (studentsError) {
         console.error('TEACHER_GRADE_IMPORT_STUDENTS_LOAD_FAILED:', studentsError.message);
@@ -565,7 +567,8 @@ export async function POST(request: Request) {
       if (gradeRows.length > 6000) return errorResponse('invalid-grade-import', 400);
       if (!gradeRows.length) return NextResponse.json({ success: true, grades: [] });
 
-      const { data: matchingStudents, error: studentsError } = await supabase.from('students').select('*')
+      const { data: matchingStudents, error: studentsError } = await supabase.from('students')
+        .select('"الرقم الجامعي", "السنه الدراسية"')
         .in('الرقم الجامعي', [...studentIds]);
       if (studentsError) {
         console.error('TEACHER_GRADE_IMPORT_STUDENTS_LOAD_FAILED:', studentsError.message);
@@ -812,8 +815,7 @@ export async function POST(request: Request) {
     }
 
     if (body.action === 'dashboard') {
-      const [studentsResult, attendanceResult, warningsResult, alertsResult] = await Promise.all([
-        supabase.from('students').select('*'),
+      const [attendanceResult, warningsResult, alertsResult] = await Promise.all([
         supabase.from('الحضور').select('*'),
         supabase.from('الإنذارات').select('*'),
         supabase.from('teacher_alerts')
@@ -821,13 +823,28 @@ export async function POST(request: Request) {
           .eq('teacher_id', teacher.id)
           .order('created_at', { ascending: false }),
       ]);
+      const studentRows: Record<string, unknown>[] = [];
+      const assignedYears = [...new Set(assignments.map((assignment) => assignment.year))];
+      for (let offset = 0; assignedYears.length && offset < 100000; offset += 500) {
+        const { data, error } = await supabase.from('students')
+          .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "الفئة", "رقم الهاتف", "السنه الدراسية", avatar_url')
+          .in('السنه الدراسية', assignedYears)
+          .order('الرقم الجامعي', { ascending: true })
+          .range(offset, offset + 499);
+        if (error) {
+          console.error('TEACHER_DASHBOARD_STUDENTS_LOAD_FAILED:', error.message);
+          return errorResponse('teacher-dashboard-load-failed', 500);
+        }
+        studentRows.push(...(data ?? []) as Record<string, unknown>[]);
+        if ((data ?? []).length < 500) break;
+      }
       const warningsTableMissing = warningsResult.error
         && (warningsResult.error.code === 'PGRST205'
           || /does not exist|relation|not found/i.test(warningsResult.error.message));
-      if (studentsResult.error || attendanceResult.error || alertsResult.error || (warningsResult.error && !warningsTableMissing)) {
+      if (attendanceResult.error || alertsResult.error || (warningsResult.error && !warningsTableMissing)) {
         return errorResponse('teacher-dashboard-load-failed', 500);
       }
-      const students = (studentsResult.data ?? []).map((row) => {
+      const students = studentRows.map((row) => {
         const student = row as Record<string, unknown>;
         return {
           id: clean(student['الرقم الجامعي'] ?? student.student_id ?? student.studentId ?? student.id),
@@ -916,7 +933,7 @@ export async function POST(request: Request) {
       }
       const { data: student, error: studentError } = await supabase
         .from('students')
-        .select('*')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "السنه الدراسية"')
         .eq('الرقم الجامعي', studentId)
         .maybeSingle();
       if (studentError) return errorResponse('student-lookup-failed', 500);

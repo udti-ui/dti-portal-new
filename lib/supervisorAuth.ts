@@ -55,13 +55,11 @@ export const verifyDegreeFourSupervisor = async (
     return { valid: verification.valid && isDegreeFour, failed: verification.failed };
   }
 
-  const { data: student, error: studentError } = await supabase.from('students').select('*')
+  const { data: student, error: studentError } = await supabase.from('students').select('"كلمة السر"')
     .eq('الرقم الجامعي', username).maybeSingle();
   if (studentError) return { valid: false, failed: true };
   if (!student) return { valid: false, failed: false };
-  const studentRecord = student as Record<string, unknown>;
-  const studentPassword = clean(studentRecord['كلمة السر'] ?? studentRecord.password ?? studentRecord.pass);
-  if (studentPassword !== password) return { valid: false, failed: false };
+  if (clean(student['كلمة السر']) !== password) return { valid: false, failed: false };
 
   const { data: supportRole, error: supportRoleError } = await supabase.from('student_chat_support_staff')
     .select('student_id').eq('student_id', username).eq('is_active', true).maybeSingle();

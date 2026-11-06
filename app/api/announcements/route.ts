@@ -24,13 +24,13 @@ const authenticateStudent = async (
   studentId: string,
   password: string
 ) => {
-  const { data: student, error } = await supabase.from('students').select('*')
+  const { data: student, error } = await supabase.from('students').select('"كلمة السر", "السنه الدراسية"')
     .eq('الرقم الجامعي', studentId).maybeSingle();
   if (error) {
     console.error('ANNOUNCEMENT_STUDENT_LOOKUP_FAILED:', error.message);
     return { student: null, error: 'announcements-load-failed' as const };
   }
-  if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+  if (!student || clean(student['كلمة السر']) !== password) {
     return { student: null, error: 'student-credentials-invalid' as const };
   }
   return { student: student as Record<string, unknown>, error: null };

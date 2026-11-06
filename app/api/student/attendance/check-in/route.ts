@@ -44,15 +44,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: 'attendance-challenge-invalid' }, { status: 400 });
     }
 
-    const { data: student, error: studentError } = await supabase.from('students').select('*')
+    const { data: student, error: studentError } = await supabase.from('students')
+      .select('"كلمة السر", "الفئة", "السنه الدراسية", "اسم الطالب"')
       .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
-    if (!student || clean(student['كلمة السر'] ?? student.password ?? student.pass) !== password) {
+    if (!student || clean(student['كلمة السر']) !== password) {
       return NextResponse.json({ success: false, error: 'student-credentials-invalid' }, { status: 401 });
     }
 
-    const studentGroup = normalizeGroup(student['الفئة'] ?? student.class ?? student.class_name ?? student['اسم الفئة']);
-    const studentYear = normalizeYear(student['السنه الدراسية'] ?? student['السنة الدراسية'] ?? student.year ?? student.student_year);
+    const studentGroup = normalizeGroup(student['الفئة']);
+    const studentYear = normalizeYear(student['السنه الدراسية']);
     if (!studentGroup || !studentYear) {
       return NextResponse.json({ success: false, error: 'student-class-not-found' }, { status: 403 });
     }
@@ -146,7 +147,7 @@ export async function POST(request: Request) {
       'التاريخ': date,
       'الوقت': attendanceTime,
       'الرقم الجامعي': studentId,
-      'اسم الطالب': clean(student['اسم الطالب'] ?? student.name),
+      'اسم الطالب': clean(student['اسم الطالب']),
       'المادة': course,
       'الفئة': classValue,
       'الحالة': 'حاضر',

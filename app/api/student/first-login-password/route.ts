@@ -29,17 +29,20 @@ export async function POST(request: Request) {
   const supabase = createSupabaseAdminClient();
   if (!supabase) return NextResponse.json({ success: false, error: 'password-service-not-configured' }, { status: 503 });
 
-  const { data: rows, error } = await supabase.from('students').select('*').eq('الرقم الجامعي', studentId).limit(1);
+  const { data: rows, error } = await supabase.from('students')
+    .select('"كلمة السر", "السنه الدراسية", force_password_change')
+    .eq('الرقم الجامعي', studentId)
+    .limit(1);
   if (error) {
     console.error('[first-login-password] student lookup failed:', error.message);
     return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
   }
   const student = rows?.[0] as Record<string, unknown> | undefined;
-  if (!student || clean(student['كلمة السر'] ?? student.password) !== currentPassword) {
+  if (!student || clean(student['كلمة السر']) !== currentPassword) {
     return NextResponse.json({ success: false, error: 'student-credentials-invalid' }, { status: 401 });
   }
 
-  const year = normalizeYear(student['السنه الدراسية'] ?? student['السنة الدراسية']);
+  const year = normalizeYear(student['السنه الدراسية']);
   const firstYear = ['1', '١', 'اولى', 'أولى', 'الأولى', 'first'].includes(year);
   const requiresChange = student.force_password_change === true
     || ['true', '1', 'yes'].includes(clean(student.force_password_change).toLocaleLowerCase());

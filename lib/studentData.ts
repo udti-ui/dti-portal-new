@@ -166,13 +166,27 @@ const getClassNameFromRow = (row: Record<string, unknown>) => {
   return normalized || 'غير محدد';
 };
 
+const getPaginatedStudentClassRows = async () => {
+  const rows: Record<string, unknown>[] = [];
+  for (let offset = 0; offset < 100000; offset += 500) {
+    const { data, error } = await supabase.from('students')
+      .select('"الرقم الجامعي", "الفئة"')
+      .order('الرقم الجامعي', { ascending: true })
+      .range(offset, offset + 499);
+    if (error) return { data: [] as Record<string, unknown>[], error };
+    rows.push(...(data ?? []) as Record<string, unknown>[]);
+    if ((data ?? []).length < 500) return { data: rows, error: null };
+  }
+  return { data: [] as Record<string, unknown>[], error: new Error('Student pagination limit exceeded.') };
+};
+
 const getStudentClassCounts = async () => {
-  const { data, error } = await supabase.from('students').select('*');
+  const { data, error } = await getPaginatedStudentClassRows();
   if (error) return {} as Record<string, number>;
 
   const counts: Record<string, number> = {};
-  for (const row of (Array.isArray(data) ? data : []) as Record<string, unknown>[]) {
-    const classValue = row['الفئة'] ?? row.class ?? row.class_name ?? row['اسم الفئة'];
+  for (const row of data) {
+    const classValue = row['الفئة'];
     if (classValue === undefined || classValue === null || classValue === '') continue;
 
     const normalized = normalizeClassName(classValue);
@@ -186,22 +200,22 @@ const getStudentClassCounts = async () => {
 
 export const syncClassSeatCounts = async () => {
   const { data: classRowsData, error: classRowsError } = await supabase.from('الفئات').select('*');
-  const { data: studentRowsData, error: studentRowsError } = await supabase.from('students').select('*');
   const { data: academicClassRowsData, error: academicClassRowsError } = await supabase.from('student_classes').select('*');
+  const { data: studentRowsData, error: studentRowsError } = await getPaginatedStudentClassRows();
 
   if (classRowsError || studentRowsError || academicClassRowsError) {
     return { success: false, synced: 0, error: classRowsError?.message ?? studentRowsError?.message ?? academicClassRowsError?.message ?? 'unknown' };
   }
 
   const classRows = Array.isArray(classRowsData) ? (classRowsData as Record<string, unknown>[]) : [];
-  const studentRows = Array.isArray(studentRowsData) ? (studentRowsData as Record<string, unknown>[]) : [];
+  const studentRows = studentRowsData;
   const academicClassRows = Array.isArray(academicClassRowsData) ? (academicClassRowsData as Record<string, unknown>[]) : [];
 
   if (!classRows.length && !academicClassRows.length) return { success: true, synced: 0 };
 
   const counts: Record<string, number> = {};
   for (const row of studentRows) {
-    const classValue = row['الفئة'] ?? row.class ?? row.class_name ?? row['اسم الفئة'];
+    const classValue = row['الفئة'];
     if (classValue === undefined || classValue === null || classValue === '') continue;
     const normalized = normalizeClassName(classValue);
     if (normalized === 'غير محدد') continue;
@@ -322,18 +336,17 @@ export const getClassAvailabilityOptions = async (studentYear = '') => {
   if (normalizedYear) {
     const { data, error } = await supabase.from('student_classes').select('*').eq('student_year', normalizedYear).order('name');
     if (error) throw error;
-    const studentRows = await getTableRows(['students']);
-    const students = studentRows.data as StudentRow[];
-    return ((data ?? []) as Record<string, unknown>[]).map((row) => {
+    return Promise.all(((data ?? []) as Record<string, unknown>[]).map(async (row) => {
       const name = normalizeClassName(row.name);
       const capacity = numericValueFromRow(row, ['capacity']);
-      const occupied = students.filter((student) => {
-        const studentRow = student as Record<string, unknown>;
-        return normalizeStudentYear(getRecordValue(studentRow, fieldAliases.year)) === normalizedYear
-          && normalizeClassName(getRecordValue(studentRow, fieldAliases.className)) === name;
-      }).length;
-      return { name, capacity, occupied, available: capacity !== null ? Math.max(capacity - occupied, 0) : null };
-    });
+      const { count: occupied, error: countError } = await supabase.from('students')
+        .select('"الرقم الجامعي"', { count: 'exact', head: true })
+        .eq('السنه الدراسية', normalizedYear)
+        .eq('الفئة', name);
+      if (countError) throw countError;
+      const occupiedCount = occupied ?? 0;
+      return { name, capacity, occupied: occupiedCount, available: capacity !== null ? Math.max(capacity - occupiedCount, 0) : null };
+    }));
   }
 
   const studentCounts = await getStudentClassCounts();
@@ -430,16 +443,22 @@ export const getStudentById = async (studentId: string) => {
 };
 
 export const getStudentsByClass = async (classGroup: string, yearFilter = '') => {
-  const rows = await getTableRows(['students']);
-  const data = rows.data as StudentRow[];
-
-  return data.filter((student) => {
-    const classValue = normalizeText(getRecordValue(student as Record<string, unknown>, fieldAliases.className)).replace('فئة ', '');
-    const yearValue = normalizeText(getRecordValue(student as Record<string, unknown>, fieldAliases.year));
-    const classMatches = !classGroup || classValue === classGroup || classValue === `فئة ${classGroup}`;
-    const yearMatches = !yearFilter || normalizeStudentYear(yearValue) === normalizeStudentYear(yearFilter);
-    return classMatches && yearMatches;
-  });
+  const normalizedYear = normalizeStudentYear(yearFilter);
+  if (yearFilter && !normalizedYear) return [];
+  const rows: StudentRow[] = [];
+  for (let offset = 0; offset < 100000; offset += 500) {
+    let query = supabase.from('students')
+      .select('"الرقم الجامعي", "اسم الطالب", "الفئة", "السنه الدراسية"')
+      .order('الرقم الجامعي', { ascending: true })
+      .range(offset, offset + 499);
+    if (classGroup) query = query.eq('الفئة', classGroup);
+    if (normalizedYear) query = query.eq('السنه الدراسية', normalizedYear);
+    const { data, error } = await query;
+    if (error) throw error;
+    rows.push(...(data ?? []) as StudentRow[]);
+    if ((data ?? []).length < 500) return rows;
+  }
+  throw new Error('Student pagination limit exceeded.');
 };
 
 export const recordAttendance = async (student: Partial<StudentRow>, course: string, classValue: string, status: 'pending' | 'present' | 'absent') => {
