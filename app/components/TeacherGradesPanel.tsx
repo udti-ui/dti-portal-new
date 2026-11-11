@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
-import { Award, Download, FileUp, Pencil, Save, Trash2, X } from 'lucide-react';
+import { Award, Download, FileUp, Pencil, Save, Send, Trash2, X } from 'lucide-react';
 
 type TeacherStudent = {
   id: string;
@@ -120,12 +120,17 @@ export default function TeacherGradesPanel({
   const [settingsBySubject, setSettingsBySubject] = useState<Record<string, GradeSettings>>({});
   const [grades, setGrades] = useState<GradeRecord[]>([]);
   const [selectedStudent, setSelectedStudent] = useState('');
+  const [studentSearch, setStudentSearch] = useState('');
+  const [showStudentsWithoutGrade, setShowStudentsWithoutGrade] = useState(false);
   const [selectedComponent, setSelectedComponent] = useState<GradeComponent>('card');
+  const [gradeComponentFilter, setGradeComponentFilter] = useState<GradeComponent | ''>('');
+  const [gradeStudentSearch, setGradeStudentSearch] = useState('');
   const [score, setScore] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingGrade, setSavingGrade] = useState(false);
   const [importingGrades, setImportingGrades] = useState(false);
+  const [sendingGradeNotifications, setSendingGradeNotifications] = useState(false);
   const [deletingGrade, setDeletingGrade] = useState<string | null>(null);
   const [deletingGroup, setDeletingGroup] = useState(false);
   const [editingGrade, setEditingGrade] = useState<{ studentId: string; component: GradeComponent } | null>(null);
@@ -156,6 +161,11 @@ export default function TeacherGradesPanel({
         'grade-import-students-unmatched': 'توجد أرقام جامعية لا تطابق طلاب المادة.',
         'invalid-grade-delete': 'تعذر تحديد العلامة المطلوب حذفها.',
         'teacher-grade-delete-failed': 'تعذر حذف العلامة.',
+        'invalid-grade-notification-subject': 'تعذر تحديد المادة لإرسال إشعار العلامات.',
+        'teacher-grade-notifications-no-grades': 'لا توجد علامات مسجلة لإرسالها للطلاب.',
+        'teacher-grade-notifications-no-students': 'لم يتم العثور على طلاب صالحين لإرسال إشعار العلامات إليهم.',
+        'teacher-grade-notifications-students-mismatch': 'تعذر التحقق من السنة الدراسية لبعض الطلاب، ولم تُرسل الإشعارات.',
+        'teacher-grade-notification-failed': 'تعذر إرسال إشعارات العلامات. لم يتم تأكيد الإرسال.',
       };
       throw new Error(errors[result.error ?? ''] ?? 'حدث خطأ أثناء تنفيذ الطلب. حاول مرة أخرى.');
     }
@@ -189,6 +199,10 @@ export default function TeacherGradesPanel({
 
   useEffect(() => {
     setSelectedStudent('');
+    setStudentSearch('');
+    setShowStudentsWithoutGrade(false);
+    setGradeComponentFilter('');
+    setGradeStudentSearch('');
     setScore('');
     setEditingGrade(null);
   }, [selectedSubject]);
@@ -222,6 +236,31 @@ export default function TeacherGradesPanel({
   const selectedTemplateComponents = templateComponents ?? availableComponents.map((component) => component.key);
   const maximum = getComponentMaximum(settings, selectedComponent);
   const visibleGrades = grades.filter((grade) => grade.subject === selectedSubject);
+  const sortedStudents = useMemo(() => [...students].sort((first, second) =>
+    first.fullName.localeCompare(second.fullName, 'ar', { sensitivity: 'base' })
+    || first.id.localeCompare(second.id, 'ar')), [students]);
+  const gradedStudentIdsForSelectedComponent = useMemo(() => new Set(visibleGrades
+    .filter((grade) => grade.component === selectedComponent)
+    .map((grade) => grade.student_id)), [selectedComponent, visibleGrades]);
+  const filteredEntryStudents = useMemo(() => {
+    const query = studentSearch.trim().toLocaleLowerCase();
+    return sortedStudents.filter((student) =>
+      (!showStudentsWithoutGrade || !gradedStudentIdsForSelectedComponent.has(student.id))
+      && (!query || `${student.fullName} ${student.id}`.toLocaleLowerCase().includes(query)));
+  }, [gradedStudentIdsForSelectedComponent, showStudentsWithoutGrade, sortedStudents, studentSearch]);
+  const sortedVisibleGrades = useMemo(() => {
+    const query = gradeStudentSearch.trim().toLocaleLowerCase();
+    return visibleGrades
+      .filter((grade) => (!gradeComponentFilter || grade.component === gradeComponentFilter)
+        && (!query || `${students.find((student) => student.id === grade.student_id)?.fullName ?? ''} ${grade.student_id}`.toLocaleLowerCase().includes(query)))
+      .sort((first, second) => {
+        const firstName = students.find((student) => student.id === first.student_id)?.fullName ?? first.student_id;
+        const secondName = students.find((student) => student.id === second.student_id)?.fullName ?? second.student_id;
+        return firstName.localeCompare(secondName, 'ar', { sensitivity: 'base' })
+          || first.student_id.localeCompare(second.student_id, 'ar')
+          || first.component.localeCompare(second.component);
+      });
+  }, [gradeComponentFilter, gradeStudentSearch, students, visibleGrades]);
   const configured = Object.prototype.hasOwnProperty.call(settingsBySubject, selectedSubject);
 
   const updateSetting = (key: keyof GradeSettings, value: boolean | number) => {
@@ -277,6 +316,7 @@ export default function TeacherGradesPanel({
       ]);
       setScore('');
       setEditingGrade(null);
+      setShowStudentsWithoutGrade(false);
       setNotice({ message: editingGrade ? 'تم تعديل العلامة بنجاح.' : 'تم حفظ العلامة بنجاح.', type: 'success' });
     } catch (error) {
       setNotice({ message: error instanceof Error ? error.message : 'تعذر حفظ العلامة.', type: 'error' });
@@ -352,6 +392,22 @@ export default function TeacherGradesPanel({
       setNotice({ message: error instanceof Error ? error.message : 'تعذر حذف العلامات.', type: 'error' });
     } finally {
       setDeletingGroup(false);
+    }
+  };
+
+  const notifyStudentsAboutGrades = async () => {
+    if (!visibleGrades.length || sendingGradeNotifications) return;
+    if (!window.confirm(`سيتم إرسال رسالة خاصة لكل طالب لديه علامات مسجلة في مادة ${selectedSubject}، وتتضمن علامات المذاكرة والامتحانات المتاحة. هل تريد المتابعة؟`)) return;
+    setSendingGradeNotifications(true);
+    setNotice(null);
+    try {
+      const result = await request({ action: 'notify-grades', subject: selectedSubject });
+      const notifiedCount = Number(result.notifiedCount ?? 0);
+      setNotice({ message: `تم إرسال إشعار العلامات إلى ${notifiedCount} طالب، وسيظهر لكل طالب في سجل التنبيهات الخاص به.`, type: 'success' });
+    } catch (error) {
+      setNotice({ message: error instanceof Error ? error.message : 'تعذر إرسال إشعارات العلامات.', type: 'error' });
+    } finally {
+      setSendingGradeNotifications(false);
     }
   };
 
@@ -723,12 +779,31 @@ export default function TeacherGradesPanel({
           <p className="teacher-grade-hint">احفظ إعدادات المادة أولاً لتفعيل إدخال العلامات.</p>
         ) : (
           <form id="teacher-grade-entry" className="teacher-grade-entry-form" onSubmit={(event) => void saveGrade(event)}>
+            <label><span>ابحث عن الطالب بالاسم أو الرقم الجامعي</span>
+              <input
+                type="search"
+                value={studentSearch}
+                onChange={(event) => setStudentSearch(event.target.value)}
+                placeholder="اكتب اسم الطالب أو رقمه"
+                autoComplete="off"
+              />
+            </label>
             <label><span>الطالب</span>
               <select required value={selectedStudent} onChange={(event) => setSelectedStudent(event.target.value)}>
                 <option value="">اختر الطالب</option>
-                {students.map((student) => <option key={student.id} value={student.id}>{student.fullName} — {student.id}</option>)}
+                {selectedStudent && !filteredEntryStudents.some((student) => student.id === selectedStudent) && (
+                  <option value={selectedStudent}>
+                    {sortedStudents.find((student) => student.id === selectedStudent)?.fullName ?? selectedStudent} — {selectedStudent}
+                  </option>
+                )}
+                {filteredEntryStudents.map((student) => <option key={student.id} value={student.id}>{student.fullName} — {student.id}</option>)}
               </select>
             </label>
+            {studentSearch && filteredEntryStudents.length === 0 && (
+              <p className="teacher-grade-hint teacher-grade-entry-search-hint">
+                لا يوجد طالب مطابق ضمن طلاب سنة المادة المحددة.
+              </p>
+            )}
             <label><span>نوع العلامة</span>
               <select value={selectedComponent} onChange={(event) => setSelectedComponent(event.target.value as GradeComponent)}>
                 {availableComponents.map(({ key }) => <option key={key} value={key}>{componentLabels[key]}</option>)}
@@ -740,6 +815,14 @@ export default function TeacherGradesPanel({
             <button type="submit" className="teacher-grade-save-button" disabled={savingGrade || !students.length}>
               <Award size={17} aria-hidden="true" /> {savingGrade ? 'جارٍ الحفظ...' : editingGrade ? 'حفظ التعديل' : 'حفظ العلامة'}
             </button>
+            <label className="teacher-grade-missing-toggle">
+              <input
+                type="checkbox"
+                checked={showStudentsWithoutGrade}
+                onChange={(event) => setShowStudentsWithoutGrade(event.target.checked)}
+              />
+              <span>إظهار الطلاب الذين لم تُسجل لهم {componentLabels[selectedComponent]}</span>
+            </label>
             {editingGrade && <button type="button" className="teacher-grade-cancel-button" onClick={cancelEditGrade} disabled={savingGrade}>
               <X size={16} aria-hidden="true" /> إلغاء التعديل
             </button>}
@@ -749,7 +832,16 @@ export default function TeacherGradesPanel({
 
       <section className="teacher-panel">
         <div className="teacher-panel-heading">
-          <div><h2>العلامات المدخلة</h2><p>تظهر العلامات المسجلة للمادة المختارة فقط.</p></div>
+          <div><h2>العلامات المدخلة</h2><p>تظهر العلامات المسجلة للمادة المختارة فقط، مرتبة أبجديًا حسب اسم الطالب.</p></div>
+          <button
+            type="button"
+            className="teacher-grade-save-button"
+            onClick={() => void notifyStudentsAboutGrades()}
+            disabled={!visibleGrades.length || sendingGradeNotifications || loading}
+          >
+            <Send size={16} aria-hidden="true" />
+            {sendingGradeNotifications ? 'جارٍ إرسال الإشعارات...' : 'إرسال إشعار العلامات للطلاب'}
+          </button>
           {configured && <div className="teacher-grade-delete-tools">
             <label>
               <span>حذف علامات نوع محدد</span>
@@ -765,12 +857,25 @@ export default function TeacherGradesPanel({
             </button>
           </div>}
         </div>
-        {visibleGrades.length ? (
+        <div className="teacher-grade-list-filters">
+          <label>
+            <span>تصفية حسب نوع العلامة</span>
+            <select value={gradeComponentFilter} onChange={(event) => setGradeComponentFilter(event.target.value as GradeComponent | '')}>
+              <option value="">كل أنواع العلامات</option>
+              {availableComponents.map(({ key }) => <option key={key} value={key}>{componentLabels[key]}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>بحث في العلامات</span>
+            <input type="search" value={gradeStudentSearch} onChange={(event) => setGradeStudentSearch(event.target.value)} placeholder="اسم الطالب أو رقمه الجامعي" />
+          </label>
+        </div>
+        {sortedVisibleGrades.length ? (
           <div className="teacher-table-wrap is-active">
             <table className="teacher-table">
               <thead><tr><th>الطالب</th><th>المكوّن</th><th>العلامة</th><th>السقف</th><th>إجراءات</th></tr></thead>
               <tbody>
-                {visibleGrades.map((grade) => (
+                {sortedVisibleGrades.map((grade) => (
                   <tr key={`${grade.student_id}-${grade.component}`}>
                     <td>{students.find((student) => student.id === grade.student_id)?.fullName ?? grade.student_id}</td>
                     <td>{componentLabels[grade.component]}</td>
@@ -791,7 +896,7 @@ export default function TeacherGradesPanel({
               </tbody>
             </table>
           </div>
-        ) : <p className="teacher-grade-hint">لا توجد علامات مدخلة لهذه المادة بعد.</p>}
+        ) : <p className="teacher-grade-hint">{visibleGrades.length ? 'لا توجد علامات تطابق عوامل التصفية.' : 'لا توجد علامات مدخلة لهذه المادة بعد.'}</p>}
       </section>
     </div>
   );

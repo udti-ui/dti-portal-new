@@ -22,6 +22,14 @@ type AccountSummary = {
 };
 
 type SearchStudent = { studentId: string; name: string; phone: string; year?: string; className?: string };
+type StudentGrade = {
+  subject: string;
+  teacher: string;
+  component: string;
+  score: number | string;
+  maxScore: number | string;
+  updatedAt: string;
+};
 type ClassOption = { name: string; capacity: number; occupied: number; available: number };
 type StudentEdit = {
   studentId: string;
@@ -55,6 +63,7 @@ type ApiResult = {
   forcePasswordChange?: boolean;
   accounts?: AccountSummary[];
   students?: SearchStudent[];
+  grades?: StudentGrade[];
   classes?: ClassOption[];
   student?: StudentEdit;
   tickets?: Ticket[];
@@ -84,6 +93,7 @@ const errorMessages: Record<string, string> = {
   'ticket-already-reviewed': 'تمت مراجعة هذا الطلب مسبقاً.',
   'student-class-unavailable': 'الفئة المختارة لا تتوفر فيها مقاعد حالياً. اختر فئة أخرى.',
   'student-classes-load-failed': 'تعذر تحميل الفئات المتاحة. حاول تحديث الصفحة.',
+  'student-grades-load-failed': 'تعذر تحميل علامات الطالب. تحقق من إعداد جداول علامات المدرسين.',
 };
 const normalizePhone = (value: string) => value
   .replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
@@ -108,6 +118,8 @@ export default function DegreeFourStudentManagement({
   const [searchText, setSearchText] = useState('');
   const [searchResults, setSearchResults] = useState<SearchStudent[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<SearchStudent | null>(null);
+  const [studentGrades, setStudentGrades] = useState<StudentGrade[] | null>(null);
+  const [gradesLoading, setGradesLoading] = useState(false);
   const [editStudent, setEditStudent] = useState<StudentEdit | null>(null);
   const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [requestedField, setRequestedField] = useState<string>('رقم الهاتف');
@@ -335,6 +347,7 @@ export default function DegreeFourStudentManagement({
     setBusy(true);
     setSelectedStudent(null);
     setEditStudent(null);
+    setStudentGrades(null);
     try {
       const result = await request('search', { query: searchText });
       setSearchResults(result.students ?? []);
@@ -347,7 +360,9 @@ export default function DegreeFourStudentManagement({
   };
 
   const selectStudent = async (student: SearchStudent) => {
+    setSelectedStudent(null);
     setEditStudent(null);
+    setStudentGrades(null);
     setSelectedStudentClasses([]);
     try {
       const result = await request('select-student', { studentId: student.studentId });
@@ -361,9 +376,23 @@ export default function DegreeFourStudentManagement({
     }
   };
 
+  const loadStudentGrades = async () => {
+    if (!selectedStudent) return;
+    setGradesLoading(true);
+    try {
+      const result = await request('student-grades', { studentId: selectedStudent.studentId });
+      setStudentGrades(result.grades ?? []);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setGradesLoading(false);
+    }
+  };
+
   const openOwnAccount = async (account: AccountSummary) => {
     setSelectedStudent({ studentId: account.studentId, name: account.name, phone: account.phone, year: account.year });
     setEditStudent(null);
+    setStudentGrades(null);
     setSelectedStudentClasses([]);
     try {
       const selected = await request('select-student', { studentId: account.studentId });
@@ -639,7 +668,7 @@ export default function DegreeFourStudentManagement({
 
       <section className="admin-table-section">
         <h2>البحث في الطلاب</h2>
-        <p>تظهر نتائج البحث الاسم ورقم الموبايل فقط. كل عملية بحث تُسجل ويمكن للإدارة العليا مراجعتها.</p>
+        <p>يعرض البحث جميع الطلاب المطابقين مع أرقامهم الجامعية وهواتفهم. كل عملية بحث تُسجل ويمكن للإدارة العليا مراجعتها.</p>
         <form className="admin-record-actions degree4-search-form" onSubmit={(event) => void searchStudents(event)}>
           <input value={searchText} onChange={(event) => setSearchText(event.target.value)} placeholder="ابحث بالاسم أو رقم الموبايل أو الرقم الجامعي" minLength={2} required />
           <button type="submit" className="action-button primary" disabled={busy}>بحث مسجل</button>
@@ -647,13 +676,36 @@ export default function DegreeFourStudentManagement({
         {searchResults.map((student) => (
           <button type="button" className="admin-record-item degree4-search-result" key={student.studentId} onClick={() => void selectStudent(student)}>
             <strong>{student.name}</strong>
-            <span>رقم الموبايل: {student.phone || 'غير متوفر'}</span>
+            <span>الرقم الجامعي: {student.studentId} · رقم الموبايل: {student.phone || 'غير متوفر'}</span>
           </button>
         ))}
+        {searchText.length >= 2 && !busy && searchResults.length === 0 && <p className="degree4-empty-results">لم يتم العثور على طلاب مطابقين.</p>}
         {selectedStudent && (
           <article className="admin-record-item">
             <strong>{selectedStudent.name}</strong>
-            <span>رقم الموبايل: {selectedStudent.phone || 'غير متوفر'}</span>
+            <span>الرقم الجامعي: {selectedStudent.studentId} · رقم الموبايل: {selectedStudent.phone || 'غير متوفر'}</span>
+            <div className="admin-record-actions">
+              <button type="button" className="action-button primary" onClick={() => void loadStudentGrades()} disabled={gradesLoading}>
+                {gradesLoading ? 'جارٍ تحميل العلامات...' : 'الاطلاع على العلامات'}
+              </button>
+            </div>
+            {studentGrades && (
+              <div className="degree4-grades-panel" aria-live="polite">
+                <h3>علامات الطالب ({studentGrades.length})</h3>
+                {!studentGrades.length ? <p>لم تُدخل علامات لهذا الطالب حتى الآن.</p> : (
+                  <div className="degree4-grades-list">
+                    {studentGrades.map((grade, index) => (
+                      <article className="degree4-grade-row" key={`${grade.subject}-${grade.component}-${index}`}>
+                        <strong>{grade.subject}</strong>
+                        <span>{grade.component}: <b>{grade.score}</b> / {grade.maxScore}</span>
+                        <span>المدرس: {grade.teacher}</span>
+                        <small>{grade.updatedAt ? new Date(grade.updatedAt).toLocaleString('ar') : 'وقت الإدخال غير متوفر'}</small>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <form className="admin-supervisor-form degree4-ticket-form" onSubmit={(event) => void submitUpdateRequest(event)}>
               <h3>طلب تعديل للإدارة العليا</h3>
               <p>لن تُحفظ البيانات المطلوبة إلا بعد موافقة الإدارة العليا.</p>

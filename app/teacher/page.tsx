@@ -480,7 +480,7 @@ export default function TeacherPortalPage() {
       });
       setAlertMessage('');
       setSelectedStudentId('');
-      setNotice({ message: 'تم إرسال التنبيه وسيظهر للطالب باللون الأصفر.', type: 'success' });
+      setNotice({ message: 'تم إرسال الرسالة، وستظهر للطالب في سجل التنبيهات الخاص به.', type: 'success' });
     } catch (error) {
       setNotice({ message: error instanceof Error ? error.message : 'تعذر إرسال التنبيه.', type: 'error' });
     } finally {

@@ -215,7 +215,7 @@ export async function POST(request: Request) {
           warning_id: alert.id,
           'الرقم الجامعي': alert.student_id,
           'اسم الطالب': getStudentName(student as Record<string, unknown>),
-          'نوع الإنذار': 'تنبيه من المدرس',
+          'نوع الإنذار': 'رسالة من المدرس',
           'السبب': `تنبيه في مادة ${alert.subject}`,
           'التفاصيل': alert.message,
           'التاريخ': alert.created_at,
@@ -354,6 +354,93 @@ export async function POST(request: Request) {
         })).filter((grade) => grade.subject
           && enabledComponentsBySubject.get(String(grade.subject_id))?.has(grade.component as GradeComponent)),
       });
+    }
+
+    if (body.action === 'notify-grades') {
+      const assignment = assignments.find((item) => item.label === clean(body.subject));
+      if (!assignment) return errorResponse('invalid-grade-notification-subject', 400);
+
+      const { data: settings, error: settingsError } = await supabase.from('teacher_subject_grade_settings')
+        .select('include_card, include_activity, include_theory_study, include_practical_study, include_theory_exam, include_practical_exam')
+        .eq('subject_id', assignment.id)
+        .maybeSingle();
+      if (settingsError) {
+        console.error('TEACHER_GRADE_NOTIFICATION_SETTINGS_LOAD_FAILED:', settingsError.message);
+        return errorResponse('teacher-grade-notification-failed', 500);
+      }
+      if (!settings) return errorResponse('teacher-grade-settings-required', 409);
+
+      const enabledComponents = new Set((Object.entries(gradeComponents) as Array<[GradeComponent, (typeof gradeComponents)[GradeComponent]]>)
+        .filter(([, component]) => settings[component.included] === true)
+        .map(([component]) => component));
+      const gradeRows: Array<{ student_id: string; component: string; score: number; max_score: number }> = [];
+      for (let offset = 0; offset < 100000; offset += 500) {
+        const { data, error } = await supabase.from('teacher_subject_grades')
+          .select('student_id, component, score, max_score')
+          .eq('subject_id', assignment.id)
+          .order('student_id')
+          .order('component')
+          .range(offset, offset + 499);
+        if (error) {
+          console.error('TEACHER_GRADE_NOTIFICATION_GRADES_LOAD_FAILED:', error.message);
+          return errorResponse('teacher-grade-notification-failed', 500);
+        }
+        gradeRows.push(...(data ?? []).filter((grade) => enabledComponents.has(grade.component as GradeComponent)));
+        if ((data ?? []).length < 500) break;
+      }
+      if (!gradeRows.length) return errorResponse('teacher-grade-notifications-no-grades', 409);
+
+      const studentIds = [...new Set(gradeRows.map((grade) => clean(grade.student_id)).filter(Boolean))];
+      const studentsById = new Map<string, Record<string, unknown>>();
+      for (let offset = 0; offset < studentIds.length; offset += 500) {
+        const { data, error } = await supabase.from('students')
+          .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "السنه الدراسية"')
+          .in('الرقم الجامعي', studentIds.slice(offset, offset + 500));
+        if (error) {
+          console.error('TEACHER_GRADE_NOTIFICATION_STUDENTS_LOAD_FAILED:', error.message);
+          return errorResponse('teacher-grade-notification-failed', 500);
+        }
+        for (const student of data ?? []) {
+          const record = student as Record<string, unknown>;
+          const studentId = clean(record['الرقم الجامعي']);
+          if (studentId && getStudentYear(record) === assignment.year) studentsById.set(studentId, record);
+        }
+      }
+      if (studentsById.size !== studentIds.length) {
+        return errorResponse('teacher-grade-notifications-students-mismatch', 409);
+      }
+
+      const gradesByStudent = new Map<string, Array<{ component: string; score: number; max_score: number }>>();
+      for (const grade of gradeRows) {
+        if (!studentsById.has(grade.student_id)) continue;
+        const studentGrades = gradesByStudent.get(grade.student_id) ?? [];
+        studentGrades.push(grade);
+        gradesByStudent.set(grade.student_id, studentGrades);
+      }
+      const notifications = [...gradesByStudent.entries()].map(([studentId, studentGrades]) => {
+        const student = studentsById.get(studentId);
+        const gradeDetails = studentGrades.map((grade) => {
+          const component = gradeComponents[grade.component as GradeComponent];
+          return `${component.label}: ${grade.score} / ${grade.max_score}`;
+        });
+        return {
+          teacher_id: teacher.id,
+          teacher_name: teacher.teacher_name,
+          student_id: studentId,
+          student_name: student ? getStudentName(student) : '',
+          subject: assignment.name,
+          student_year: assignment.year,
+          message: `تم نشر علاماتك في مادة ${assignment.name}:\n${gradeDetails.join('\n')}`,
+        };
+      });
+      if (!notifications.length) return errorResponse('teacher-grade-notifications-no-students', 409);
+
+      const { error: notificationError } = await supabase.from('teacher_alerts').insert(notifications);
+      if (notificationError) {
+        console.error('TEACHER_GRADE_NOTIFICATIONS_SAVE_FAILED:', notificationError.message);
+        return errorResponse('teacher-grade-notification-failed', 500);
+      }
+      return NextResponse.json({ success: true, notifiedCount: notifications.length });
     }
 
     if (body.action === 'save-grade-settings') {

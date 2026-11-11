@@ -150,6 +150,7 @@ export async function POST(request: Request) {
         ? Math.min(Math.max(requestedPageSize, 10), 100)
         : 30;
       const search = clean(body.search, 100).replace(/[,*%()\\"]/g, ' ').trim();
+      const numericSearch = arabicDigits(search);
       const className = clean(body.className, 80);
       const year = clean(body.year, 40);
       const section = clean(body.section, 120);
@@ -158,20 +159,26 @@ export async function POST(request: Request) {
 
       let query = supabase.from('students')
         .select(
-          '"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "ملاحظة", telegram_chat_id, telegram_notifications_enabled, avatar_url'
+          '"الرقم الجامعي", "كلمة السر", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "ملاحظة", telegram_chat_id, telegram_notifications_enabled, avatar_url'
         )
         .order('الرقم الجامعي', { ascending: true })
         .range(start, start + pageSize);
       if (search) {
         const pattern = `*${search}*`;
-        filters.push(`or(${[
-          `"الرقم الجامعي".ilike.${pattern}`,
+        const searchConditions = [
           `"اسم الطالب".ilike.${pattern}`,
           `"اسم الاب".ilike.${pattern}`,
           `"الكنية".ilike.${pattern}`,
           `"الفئة".ilike.${pattern}`,
           `"القسم".ilike.${pattern}`,
-        ].join(',')})`);
+        ];
+        const validBigintSearch = /^\d+$/.test(numericSearch)
+          && (numericSearch.length < 19
+            || (numericSearch.length === 19 && numericSearch <= '9223372036854775807'));
+        if (validBigintSearch) {
+          searchConditions.push(`"الرقم الجامعي".eq.${numericSearch}`);
+        }
+        filters.push(`or(${searchConditions.join(',')})`);
       }
       if (className && className !== 'بدون فئة') query = query.eq('الفئة', className);
       if (className === 'بدون فئة') filters.push('or("الفئة".is.null,"الفئة".eq."")');
@@ -182,8 +189,18 @@ export async function POST(request: Request) {
 
       const { data, error } = await query;
       if (error) {
-        console.error('[student-operations] paginated student list failed:', error.message);
-        return responseError('student-list-failed', 500);
+        console.error('[student-operations] paginated student list failed:', {
+          message: error.message,
+          code: error.code,
+          details: error.details,
+          hint: error.hint,
+        });
+        const detail = [error.message, error.code ? `(${error.code})` : ''].filter(Boolean).join(' ');
+        return responseError(
+          'student-list-failed',
+          500,
+          `تعذر قراءة جدول الطلاب في Supabase. تأكد من وجود جدول students وأعمدته المطلوبة. التفاصيل: ${detail}`
+        );
       }
       const rows = data ?? [];
       return NextResponse.json({
@@ -344,19 +361,103 @@ export async function POST(request: Request) {
       const term = clean(body.query, 120);
       if (term.length < 2) return responseError('search-term-too-short', 400);
       await audit(request, username, 'degree4_student_search', { query: term });
-      const { data, error } = await supabase.rpc('search_students_for_degree4', { p_query: term });
-      if (error) return responseError('student-search-failed', 500);
+      const pageSize = 30;
+      const matches: Array<{ student_id: unknown; student_name: unknown; phone: unknown }> = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const { data, error } = await supabase.rpc('search_students_for_degree4', {
+          p_query: term,
+          p_offset: offset,
+          p_limit: pageSize,
+        });
+        if (error) {
+          console.error('[degree4-students] search failed:', error.message);
+          return responseError('student-search-failed', 500);
+        }
+        const page = (data ?? []) as Array<{ student_id: unknown; student_name: unknown; phone: unknown }>;
+        matches.push(...page);
+        if (page.length < pageSize) break;
+      }
       return NextResponse.json({
         success: true,
-        students: ((data ?? []) as Array<{
-          student_id: unknown;
-          student_name: unknown;
-          phone: unknown;
-        }>).map((row) => ({
+        students: matches.map((row) => ({
           studentId: formatStudentId(row.student_id),
           name: clean(row.student_name),
           phone: clean(row.phone),
         })),
+      });
+    }
+
+    if (action === 'student-grades') {
+      const studentId = clean(body.studentId, 40);
+      if (!studentId) return responseError('invalid-student-id', 400);
+      const grades: Array<Record<string, unknown>> = [];
+      const pageSize = 30;
+      for (let offset = 0; ; offset += pageSize) {
+        const { data, error } = await supabase.from('teacher_subject_grades')
+          .select('subject_id, component, score, max_score, updated_at, entered_by')
+          .eq('student_id', studentId)
+          .order('updated_at', { ascending: false })
+          .order('subject_id')
+          .range(offset, offset + pageSize - 1);
+        if (error) {
+          console.error('[degree4-students] student grades lookup failed:', error.message);
+          return responseError('student-grades-load-failed', 500);
+        }
+        const page = (data ?? []) as Array<Record<string, unknown>>;
+        grades.push(...page);
+        if (page.length < pageSize) break;
+      }
+      const subjectIds = [...new Set(grades.map((grade) => String(grade.subject_id)))];
+      const teacherIds = [...new Set(grades.map((grade) => String(grade.entered_by)))];
+      const subjects: Array<Record<string, unknown>> = [];
+      for (let offset = 0; offset < subjectIds.length; offset += 25) {
+        const { data, error } = await supabase.from('academic_subjects')
+          .select('id, name, student_year')
+          .in('id', subjectIds.slice(offset, offset + 25));
+        if (error) {
+          console.error('[degree4-students] subject lookup for grades failed:', error.message);
+          return responseError('student-grades-load-failed', 500);
+        }
+        subjects.push(...(data ?? []) as Array<Record<string, unknown>>);
+      }
+      const teachers: Array<Record<string, unknown>> = [];
+      for (let offset = 0; offset < teacherIds.length; offset += 25) {
+        const { data, error } = await supabase.from('teachers')
+          .select('id, teacher_name')
+          .in('id', teacherIds.slice(offset, offset + 25));
+        if (error) {
+          console.error('[degree4-students] teacher lookup for grades failed:', error.message);
+          return responseError('student-grades-load-failed', 500);
+        }
+        teachers.push(...(data ?? []) as Array<Record<string, unknown>>);
+      }
+      const subjectsById = new Map(subjects.map((subject) => [
+        String(subject.id),
+        `${clean(subject.name)} · ${clean(subject.student_year)}`,
+      ]));
+      const teachersById = new Map(teachers.map((teacher) => [String(teacher.id), clean(teacher.teacher_name)]));
+      const componentLabels: Record<string, string> = {
+        card: 'علامة البطاقة',
+        activity: 'علامة النشاط',
+        theoryStudy: 'مذاكرة نظرية',
+        practicalStudy: 'مذاكرة عملية',
+        theoryExam: 'امتحان نظري',
+        practicalExam: 'امتحان عملي',
+      };
+      const results = grades.map((grade) => ({
+        subject: subjectsById.get(String(grade.subject_id)) ?? 'مادة غير معروفة',
+        teacher: teachersById.get(String(grade.entered_by)) ?? 'مدرس غير معروف',
+        component: componentLabels[String(grade.component)] ?? String(grade.component),
+        score: grade.score,
+        maxScore: grade.max_score,
+        updatedAt: grade.updated_at,
+      }));
+      await audit(request, username, 'degree4_student_grades_viewed', {
+        studentId,
+        gradeCount: results.length,
+      });
+      return NextResponse.json({ success: true, grades: results }, {
+        headers: { 'Cache-Control': 'private, no-store' },
       });
     }
 

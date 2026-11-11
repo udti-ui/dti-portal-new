@@ -59,6 +59,16 @@ type StudentFeedback = {
 };
 type AdminRecord = Record<string, unknown>;
 type AcademicTeacher = { id: string; teacher_name: string; is_active: boolean; login_username?: string | null };
+type AcademicTeacherGrade = {
+  id: string;
+  studentId: string;
+  studentName: string;
+  subject: string;
+  component: string;
+  score: number | string;
+  maxScore: number | string;
+  updatedAt: string;
+};
 type AcademicSubject = { id: string; name: string; student_year: string; teacher_id: string };
 type AcademicClass = { id: string; name: string; student_year: string; capacity: number | null };
 type AcademicScheduleItem = {
@@ -1296,6 +1306,9 @@ export default function AttendancePage() {
   const [academicManagementSaving, setAcademicManagementSaving] = useState(false);
   const [academicManagementNotice, setAcademicManagementNotice] = useState('');
   const [academicManagementNoticeType, setAcademicManagementNoticeType] = useState<'error' | 'success'>('success');
+  const [teacherGradesById, setTeacherGradesById] = useState<Record<string, AcademicTeacherGrade[]>>({});
+  const [expandedTeacherGradesId, setExpandedTeacherGradesId] = useState('');
+  const [loadingTeacherGradesId, setLoadingTeacherGradesId] = useState('');
   const [teacherDraft, setTeacherDraft] = useState({ id: '', name: '', username: '', password: '', isActive: true });
   const [subjectDraft, setSubjectDraft] = useState({ id: '', name: '', studentYear: 'أولى', teacherId: '' });
   const [classDraft, setClassDraft] = useState({ id: '', name: '', studentYear: 'أولى', capacity: '' });
@@ -1923,6 +1936,7 @@ export default function AttendancePage() {
       message?: string;
       code?: string;
       teachers?: AcademicTeacher[];
+      grades?: AcademicTeacherGrade[];
       subjects?: AcademicSubject[];
       classes?: AcademicClass[];
       schedule?: AcademicScheduleItem[];
@@ -1932,6 +1946,12 @@ export default function AttendancePage() {
         'academic-management-server-key-missing': 'يجب إعداد مفتاح الخادم SUPABASE_SERVICE_ROLE_KEY.',
         'supervisor-credentials-invalid': 'تعذر التحقق من صلاحية المشرف.',
         'academic-management-load-failed': 'تعذر تحميل المدرسين والفئات والبرنامج. تأكد من تشغيل ملف supabase-academic-management.sql.',
+        'teacher-grades-load-failed': 'تعذر تحميل العلامات التي أدخلها المدرس. تحقق من إعداد جداول العلامات.',
+        'teacher-grades-teacher-load-failed': 'تعذر التحقق من بيانات المدرس.',
+        'teacher-grades-subjects-load-failed': 'تعذر تحميل مواد علامات المدرس.',
+        'teacher-grades-students-load-failed': 'تعذر تحميل أسماء الطلاب المرتبطة بالعلامات.',
+        'invalid-teacher': 'تعذر تحديد المدرس المطلوب.',
+        'teacher-not-found': 'المدرس المطلوب غير موجود.',
         'subject-assignment-required': 'عيّن المادة لمدرس قبل إضافتها إلى البرنامج.',
         'class-in-use': 'لا يمكن حذف الفئة أو تغيير اسمها/سنتها ما دام فيها طلاب أو مواعيد برنامج.',
         'invalid-teacher-account': 'اسم المستخدم يجب أن يكون 3 محارف على الأقل وكلمة المرور 8 محارف على الأقل.',
@@ -1979,6 +1999,27 @@ export default function AttendancePage() {
     }
     return true;
   }, [academicManagementRequest, selectedYear]);
+
+  const toggleTeacherGrades = async (teacherId: string) => {
+    if (expandedTeacherGradesId === teacherId) {
+      setExpandedTeacherGradesId('');
+      return;
+    }
+    setExpandedTeacherGradesId(teacherId);
+    if (Object.prototype.hasOwnProperty.call(teacherGradesById, teacherId)) return;
+    setLoadingTeacherGradesId(teacherId);
+    setAcademicManagementNotice('');
+    try {
+      const result = await academicManagementRequest({ action: 'teacher-grades', teacherId });
+      setTeacherGradesById((current) => ({ ...current, [teacherId]: result.grades ?? [] }));
+    } catch (error) {
+      setExpandedTeacherGradesId('');
+      setAcademicManagementNoticeType('error');
+      setAcademicManagementNotice(error instanceof Error ? error.message : 'تعذر تحميل علامات المدرس.');
+    } finally {
+      setLoadingTeacherGradesId('');
+    }
+  };
 
   const runAcademicAction = async (payload: Record<string, unknown>, successMessage: string) => {
     setAcademicManagementSaving(true);
@@ -4153,12 +4194,35 @@ export default function AttendancePage() {
                       </div>
                       <div className="student-directory-actions">
                         <button type="button" className="action-button" onClick={() => setTeacherDraft({ id: teacher.id, name: teacher.teacher_name, username: teacher.login_username ?? '', password: '', isActive: teacher.is_active })}>تعديل الحساب</button>
+                        <button type="button" className="action-button" onClick={() => void toggleTeacherGrades(teacher.id)} disabled={loadingTeacherGradesId === teacher.id}>
+                          {loadingTeacherGradesId === teacher.id ? 'جارٍ تحميل العلامات...' : expandedTeacherGradesId === teacher.id ? 'إخفاء العلامات' : 'العلامات المدخلة'}
+                        </button>
                         <button type="button" className="action-button danger" disabled={academicManagementSaving} onClick={() => {
                           if (window.confirm(`سيؤدي حذف ${teacher.teacher_name} إلى حذف المواد ومواعيد برنامجه. هل تريد المتابعة؟`)) {
                             void runAcademicAction({ action: 'delete-teacher', id: teacher.id }, 'تم حذف المدرس وارتباطاته.');
                           }
                         }}>حذف</button>
                       </div>
+                      {expandedTeacherGradesId === teacher.id && (
+                        <div className="teacher-grades-review" aria-live="polite">
+                          <h3>العلامات التي أدخلها {teacher.teacher_name}</h3>
+                          {!teacherGradesById[teacher.id]?.length ? (
+                            <p>لم يُدخل هذا المدرس أي علامات بعد.</p>
+                          ) : (
+                            <div className="teacher-grades-review-list">
+                              {teacherGradesById[teacher.id].map((grade) => (
+                                <article className="teacher-grades-review-row" key={grade.id}>
+                                  <strong>{grade.studentName}</strong>
+                                  <span>الرقم الجامعي: {grade.studentId}</span>
+                                  <span>{grade.subject}</span>
+                                  <span>{grade.component}: <b>{grade.score}</b> / {grade.maxScore}</span>
+                                  <small>{grade.updatedAt ? new Date(grade.updatedAt).toLocaleString('ar') : 'وقت الإدخال غير متوفر'}</small>
+                                </article>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </article>
                   ))}
                   {!academicTeachers.length && <div className="loading-box">لم تتم إضافة مدرسين بعد. استخدم النموذج أعلاه لإنشاء أول حساب.</div>}

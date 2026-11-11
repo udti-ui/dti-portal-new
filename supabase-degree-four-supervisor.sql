@@ -128,7 +128,9 @@ $$;
 revoke all on function public.suggest_student_university_id() from public, anon, authenticated;
 grant execute on function public.suggest_student_university_id() to service_role;
 
-create or replace function public.search_students_for_degree4(p_query text)
+drop function if exists public.search_students_for_degree4(text);
+
+create function public.search_students_for_degree4(p_query text, p_offset integer, p_limit integer)
 returns table(student_id text, student_name text, phone text)
 language sql
 security definer
@@ -151,11 +153,12 @@ as $$
       or position(q.digit_value in translate(btrim(s."الرقم الجامعي"::text), '٠١٢٣٤٥٦٧٨٩', '0123456789')) > 0
     )
   order by s."الرقم الجامعي"::text
-  limit 40;
+  limit greatest(1, least(coalesce(p_limit, 500), 500))
+  offset greatest(coalesce(p_offset, 0), 0);
 $$;
 
-revoke all on function public.search_students_for_degree4(text) from public, anon, authenticated;
-grant execute on function public.search_students_for_degree4(text) to service_role;
+revoke all on function public.search_students_for_degree4(text, integer, integer) from public, anon, authenticated;
+grant execute on function public.search_students_for_degree4(text, integer, integer) to service_role;
 
 create or replace function public.available_student_classes_for_year(p_year text)
 returns table(name text, capacity integer, occupied bigint, available bigint)

@@ -3679,6 +3679,55 @@ a {
   gap: 12px;
 }
 
+.teacher-grade-entry-search-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.teacher-grade-missing-toggle {
+  display: flex !important;
+  grid-column: 1 / -1;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 8px !important;
+  cursor: pointer;
+}
+
+.teacher-grade-entry-form .teacher-grade-missing-toggle input {
+  width: 17px;
+  min-width: 17px;
+  min-height: 17px;
+  margin: 0;
+  accent-color: #0f766e;
+}
+
+.teacher-grade-list-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.teacher-grade-list-filters label {
+  display: grid;
+  gap: 6px;
+  color: var(--page-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.teacher-grade-list-filters input,
+.teacher-grade-list-filters select {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--page-border);
+  border-radius: 9px;
+  background: var(--page-card);
+  color: var(--page-text);
+  font: inherit;
+}
+
 .teacher-grade-import-tools {
   display: flex;
   flex-wrap: wrap;
@@ -9862,6 +9911,65 @@ html[data-theme='dark'] .student-chat-notification-item:hover {
   text-align: right;
 }
 
+.degree4-empty-results {
+  margin: 12px 0;
+  color: var(--page-text-muted);
+  text-align: center;
+}
+
+.degree4-grades-panel,
+.teacher-grades-review {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--page-border);
+  border-radius: 12px;
+  background: var(--page-surface-strong);
+}
+
+.degree4-grades-panel h3,
+.degree4-grades-panel p,
+.teacher-grades-review h3,
+.teacher-grades-review p {
+  margin: 0;
+}
+
+.degree4-grades-list,
+.teacher-grades-review-list {
+  display: grid;
+  gap: 8px;
+}
+
+.degree4-grade-row,
+.teacher-grades-review-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: center;
+  gap: 6px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--page-border);
+  border-radius: 9px;
+  background: var(--page-card);
+  color: var(--page-text);
+  font-size: 13px;
+}
+
+.degree4-grade-row small,
+.teacher-grades-review-row small {
+  color: var(--page-text-muted);
+}
+
+.teacher-grades-review {
+  color: var(--page-text);
+}
+
+.teacher-grades-review .teacher-grades-review-row {
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+}
+
 .degree4-ticket-form {
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
@@ -9940,6 +10048,11 @@ html[data-theme='dark'] .degree4-ticket-form textarea {
   }
 
   .degree4-search-form {
+    grid-template-columns: 1fr;
+  }
+
+  .degree4-grade-row,
+  .teacher-grades-review-row {
     grid-template-columns: 1fr;
   }
 

@@ -84,6 +84,7 @@ export async function POST(request: Request) {
     const supportedActions = [
       'list', 'save-teacher', 'delete-teacher', 'save-subject', 'delete-subject',
       'save-class', 'delete-class', 'save-schedule', 'delete-schedule',
+      'teacher-grades',
     ];
     if (!supportedActions.includes(action)) return errorResponse('invalid-action', 400);
 
@@ -100,6 +101,86 @@ export async function POST(request: Request) {
     }
     if (!supabase) return errorResponse('academic-management-server-key-missing', 503, 'Supabase admin client could not be initialized.');
     if (!await verifySupervisor(supabase, username, password)) return errorResponse('supervisor-credentials-invalid', 401);
+
+    if (action === 'teacher-grades') {
+      const teacherId = clean(body.teacherId);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(teacherId)) {
+        return errorResponse('invalid-teacher', 400);
+      }
+      const { data: teacher, error: teacherError } = await supabase.from('teachers')
+        .select('id, teacher_name')
+        .eq('id', teacherId)
+        .maybeSingle();
+      if (teacherError) return databaseErrorResponse('teacher-grades-teacher-load-failed', teacherError);
+      if (!teacher) return errorResponse('teacher-not-found', 404);
+
+      const gradeRows: Array<Record<string, unknown>> = [];
+      const pageSize = 30;
+      for (let offset = 0; ; offset += pageSize) {
+        const { data, error } = await supabase.from('teacher_subject_grades')
+          .select('id, subject_id, student_id, component, score, max_score, updated_at')
+          .eq('entered_by', teacherId)
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: false })
+          .range(offset, offset + pageSize - 1);
+        if (error) return databaseErrorResponse('teacher-grades-load-failed', error);
+        const page = (data ?? []) as Array<Record<string, unknown>>;
+        gradeRows.push(...page);
+        if (page.length < pageSize) break;
+      }
+
+      const subjectIds = [...new Set(gradeRows.map((grade) => clean(grade.subject_id)).filter(Boolean))];
+      const studentIds = [...new Set(gradeRows.map((grade) => clean(grade.student_id)).filter(Boolean))];
+      const subjects: Array<Record<string, unknown>> = [];
+      for (let offset = 0; offset < subjectIds.length; offset += 25) {
+        const batch = subjectIds.slice(offset, offset + 25);
+        const { data, error } = await supabase.from('academic_subjects')
+          .select('id, name, student_year')
+          .in('id', batch);
+        if (error) return databaseErrorResponse('teacher-grades-subjects-load-failed', error);
+        subjects.push(...(data ?? []) as Array<Record<string, unknown>>);
+      }
+      const students: Array<Record<string, unknown>> = [];
+      for (let offset = 0; offset < studentIds.length; offset += 25) {
+        const batch = studentIds.slice(offset, offset + 25);
+        const { data, error } = await supabase.from('students')
+          .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية"')
+          .in('الرقم الجامعي', batch);
+        if (error) return databaseErrorResponse('teacher-grades-students-load-failed', error);
+        students.push(...(data ?? []) as Array<Record<string, unknown>>);
+      }
+
+      const subjectById = new Map(subjects.map((subject) => [
+        clean(subject.id),
+        `${clean(subject.name)} · ${clean(subject.student_year)}`,
+      ]));
+      const studentById = new Map(students.map((student) => [
+        clean(student['الرقم الجامعي']),
+        [student['اسم الطالب'], student['اسم الاب'], student['الكنية']].map(clean).filter(Boolean).join(' '),
+      ]));
+      const componentLabels: Record<string, string> = {
+        card: 'علامة البطاقة',
+        activity: 'علامة النشاط',
+        theoryStudy: 'مذاكرة نظرية',
+        practicalStudy: 'مذاكرة عملية',
+        theoryExam: 'امتحان نظري',
+        practicalExam: 'امتحان عملي',
+      };
+      return NextResponse.json({
+        success: true,
+        teacher: { id: teacherId, name: clean(teacher.teacher_name) },
+        grades: gradeRows.map((grade) => ({
+          id: clean(grade.id),
+          studentId: clean(grade.student_id),
+          studentName: studentById.get(clean(grade.student_id)) || 'طالب غير معروف',
+          subject: subjectById.get(clean(grade.subject_id)) || 'مادة غير معروفة',
+          component: componentLabels[clean(grade.component)] || clean(grade.component),
+          score: grade.score,
+          maxScore: grade.max_score,
+          updatedAt: clean(grade.updated_at),
+        })),
+      }, { headers: { 'Cache-Control': 'private, no-store' } });
+    }
 
     if (action === 'list') {
       const [teachers, subjects, classes, schedule] = await Promise.all([
