@@ -93,8 +93,8 @@ export default function StudentTeacherInquiries({
   const submitInquiry = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedYear || !selectedSubject || message.trim().length < 3) return;
-    if (attachment && attachment.size > 5 * 1024 * 1024) {
-      setNotice({ message: 'حجم المرفق يجب ألا يتجاوز 5 ميغابايت.', error: true });
+    if (attachment && attachment.size > 4 * 1024 * 1024) {
+      setNotice({ message: 'حجم المرفق يجب ألا يتجاوز 4 ميغابايت.', error: true });
       return;
     }
 
@@ -119,7 +119,7 @@ export default function StudentTeacherInquiries({
       };
       if (!response.ok || !result.success) {
         const messages: Record<string, string> = {
-          'inquiry-attachment-invalid': 'نوع الملف غير مدعوم أو تجاوز حجمه 5 ميغابايت.',
+          'inquiry-attachment-invalid': 'نوع الملف غير مدعوم أو تجاوز حجمه 4 ميغابايت.',
           'inquiry-no-active-teachers': 'لا يوجد مدرس نشط معيّن لهذه المادة حاليًا.',
           'inquiry-subject-not-assigned': 'المادة المحددة غير متاحة لحسابك.',
           'student-credentials-invalid': 'انتهت صلاحية تسجيل الدخول. أعد تسجيل الدخول ثم حاول مجددًا.',
@@ -196,7 +196,7 @@ export default function StudentTeacherInquiries({
             <Send size={16} aria-hidden="true" /> {sending ? 'جارٍ الإرسال...' : 'إرسال الاستفسار'}
           </button>
         </div>
-        <small style={{ color: '#64756f' }}>الصور وملفات PDF وWord والنصوص — بحد أقصى 5 ميغابايت.</small>
+        <small style={{ color: '#64756f' }}>الصور وملفات PDF وWord والنصوص — بحد أقصى 4 ميغابايت.</small>
       </form>
 
       {notice && <p role={notice.error ? 'alert' : 'status'} style={{ margin: 0, color: notice.error ? '#a62828' : '#187447', fontWeight: 700 }}>{notice.message}</p>}

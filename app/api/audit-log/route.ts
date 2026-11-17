@@ -5,11 +5,12 @@ import { createSupabaseAdminClient } from '../../../lib/supabaseAdmin';
 export const dynamic = 'force-dynamic';
 
 const clean = (value: unknown, maxLength = 500) => String(value ?? '').trim().slice(0, maxLength);
+const arabicDigits = (value: string) => value.replace(/[٠-٩]/g, (digit) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));
 const isAuditUserType = (value: string): value is 'student' | 'teacher' | 'supervisor' | 'support_supervisor' | 'system' =>
   ['student', 'teacher', 'supervisor', 'support_supervisor', 'system'].includes(value);
 const normalize = (value: unknown) => clean(value, 200).replace(/\s+/g, '').toLocaleLowerCase();
 
-const readAuditLogs = async (username: string, password: string) => {
+const readAuditLogs = async (username: string, password: string, studentId: string) => {
   const supabase = createSupabaseAdminClient();
   if (!supabase) return NextResponse.json({ success: false, error: 'audit-service-not-configured' }, { status: 503 });
   if (!username || !password) return NextResponse.json({ success: false, error: 'supervisor-credentials-required' }, { status: 400 });
@@ -32,15 +33,40 @@ const readAuditLogs = async (username: string, password: string) => {
     return NextResponse.json({ success: false, error: 'audit-access-denied' }, { status: 403 });
   }
 
-  const { data: logs, error: logsError } = await supabase.from('سجلات النظام')
-    .select('*')
-    .order('created_at', { ascending: false })
-    .limit(1000);
-  if (logsError) {
-    console.error('[audit] log read failed:', logsError.message);
-    return NextResponse.json({ success: false, error: 'audit-log-read-failed' }, { status: 500 });
+  const studentIdVariants = studentId
+    ? [...new Set([
+      studentId,
+      studentId.replace(/^0+(?=\d)/, ''),
+      studentId.replace(/^0+(?=\d)/, '').padStart(4, '0'),
+    ])]
+    : [];
+  const studentFilters = studentIdVariants.flatMap((id) => [
+    `user_id.eq.${id}`,
+    `details->>studentId.eq.${id}`,
+    `details->>student_id.eq.${id}`,
+  ]).join(',');
+  const logs: Record<string, unknown>[] = [];
+  const pageSize = 1000;
+
+  for (let offset = 0; ; offset += pageSize) {
+    let query = supabase.from('سجلات النظام')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .range(offset, offset + pageSize - 1);
+    if (studentFilters) query = query.or(studentFilters);
+
+    const { data, error } = await query;
+    if (error) {
+      console.error('[audit] log read failed:', error.message);
+      return NextResponse.json({ success: false, error: 'audit-log-read-failed' }, { status: 500 });
+    }
+
+    const page = (data ?? []) as Record<string, unknown>[];
+    logs.push(...page);
+    if (page.length < pageSize) break;
   }
-  return NextResponse.json({ success: true, logs: logs ?? [] });
+
+  return NextResponse.json({ success: true, logs });
 };
 
 export async function POST(request: Request) {
@@ -57,7 +83,11 @@ export async function POST(request: Request) {
 
   const payload = body as Record<string, unknown>;
   if (payload.mode === 'read') {
-    return readAuditLogs(clean(payload.username, 160), clean(payload.password, 300));
+    const studentId = arabicDigits(clean(payload.studentId, 40)).replace(/\s+/g, '');
+    if (studentId && !/^\d+$/.test(studentId)) {
+      return NextResponse.json({ success: false, error: 'invalid-student-id' }, { status: 400 });
+    }
+    return readAuditLogs(clean(payload.username, 160), clean(payload.password, 300), studentId);
   }
 
   const action = clean(payload.action, 120);

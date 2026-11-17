@@ -1,21 +1,49 @@
-import nodemailer from 'nodemailer';
+import nodemailer, { type Transporter } from 'nodemailer';
+
+const DEFAULT_SMTP_HOST = 'smtp.gmail.com';
+const DEFAULT_SMTP_PORT = 465;
+const DEFAULT_SENDER = 'dtisped@gmail.com';
+const PORTAL_URL = 'https://my-dti.netlify.app';
+
+const readEnv = (...names: string[]) => {
+  for (const name of names) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  return '';
+};
+
+const getSmtpSettings = () => {
+  const host = readEnv('SMTP_HOST') || DEFAULT_SMTP_HOST;
+  const parsedPort = Number(readEnv('SMTP_PORT'));
+  const port = Number.isInteger(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_SMTP_PORT;
+  const user = readEnv('SMTP_USER', 'GMAIL_USER') || DEFAULT_SENDER;
+  // كلمة مرور التطبيق في Gmail تُعرض مفصولة بمسافات؛ نزيلها حتى لا تفشل المصادقة.
+  const pass = readEnv('SMTP_PASS', 'GMAIL_PASS').replace(/\s+/g, '');
+  return { host, port, user, pass, secure: port === 465 };
+};
+
+let cachedTransporter: { key: string; transporter: Transporter } | null = null;
 
 const getSmtpTransporter = () => {
-  // يتم قراءة البيانات ديناميكياً من متغيرات البيئة لتخطي فحص الأمان بنجاح
-  const host = "://gmail.com";
-  const port = 465;
-  const user = process.env.SMTP_USER || process.env.GMAIL_USER || "dtisped@gmail.com";
-  const pass = process.env.SMTP_PASS || process.env.GMAIL_PASS;
+  const { host, port, user, pass, secure } = getSmtpSettings();
+  if (!pass) return null;
 
-  return nodemailer.createTransport({
+  const key = `${host}:${port}:${user}:${pass.length}`;
+  if (cachedTransporter?.key === key) return cachedTransporter.transporter;
+
+  const transporter = nodemailer.createTransport({
     host,
     port,
-    secure: true,
-    auth: { 
-      user, 
-      pass: pass?.trim() 
-    },
+    secure,
+    auth: { user, pass },
+    // مهلات صريحة حتى لا يبقى الطلب معلقًا عند تعذر الوصول للخادم.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
   });
+  cachedTransporter = { key, transporter };
+  return transporter;
 };
 
 const escapeHtml = (value: string | number | null | undefined) => String(value ?? '')
@@ -34,24 +62,36 @@ export async function sendEmail({
   subject: string;
   html: string;
 }) {
-  const transporter = getSmtpTransporter();
-  const recipient = to.trim();
-  const sender = process.env.SMTP_USER || process.env.GMAIL_USER || "dtisped@gmail.com";
-
-  if (!transporter || !sender || !recipient) {
-    return { success: false, error: 'smtp-not-configured-or-recipient-missing' };
+  const recipient = String(to ?? '').trim();
+  if (!recipient || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+    return { success: false, error: 'email-recipient-invalid' };
   }
 
+  const transporter = getSmtpTransporter();
+  if (!transporter) {
+    console.error('Email skipped: SMTP_PASS (or GMAIL_PASS) is not configured on the server.');
+    return { success: false, error: 'smtp-not-configured' };
+  }
+
+  const { user } = getSmtpSettings();
   try {
     await transporter.sendMail({
-      from: `معهد طب الأسنان <${sender}>`,
+      from: { name: 'معهد طب الأسنان', address: user },
       to: recipient,
       subject,
       html,
     });
     return { success: true };
   } catch (error) {
-    console.error('Email notification failed:', error);
+    const details = error as { code?: string; responseCode?: number; response?: string; message?: string };
+    console.error('Email notification failed:', {
+      code: details.code,
+      responseCode: details.responseCode,
+      response: details.response,
+      message: details.message,
+    });
+    // نعيد التخزين المؤقت للناقل بعد أي فشل حتى لا يبقى اتصال معطوب مستخدمًا.
+    cachedTransporter = null;
     return { success: false, error: 'email-send-failed' };
   }
 }
@@ -68,7 +108,7 @@ export const buildClassChangeEmail = ({
   const safeStudentName = escapeHtml(studentName);
   const safePreviousClass = escapeHtml(previousClass || 'غير محددة');
   const safeNextClass = escapeHtml(nextClass);
-  const logoUrl = 'https://netlify.app';
+  const logoUrl = `${PORTAL_URL}/institute-logo.png`;
 
   return `<!DOCTYPE html>
 <html lang="ar" dir="rtl">

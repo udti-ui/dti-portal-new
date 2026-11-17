@@ -139,7 +139,13 @@ export async function POST(request: Request) {
         subject: 'رمز استعادة كلمة المرور',
         html: `<div dir="rtl" style="font-family:Arial,sans-serif;line-height:1.8"><h2>استعادة كلمة المرور</h2><p>مرحبًا ${escapeHtml(studentName)}،</p><p><strong>اسم المستخدم:</strong> ${escapeHtml(username)}</p><p><strong>الرقم الجامعي:</strong> ${escapeHtml(studentId)}</p><p>رمز التحقق الخاص بك:</p><div style="font-size:30px;font-weight:800;letter-spacing:8px;color:#0f766e">${escapeHtml(code)}</div><p>الرمز صالح لمدة 15 دقيقة.</p></div>`,
       });
-      if (!result.success) return jsonError('email-send-failed', 502, result.error ?? 'تعذر إرسال البريد الإلكتروني.');
+      if (!result.success) {
+        const emailErrorMessages: Record<string, string> = {
+          'smtp-not-configured': 'خدمة البريد غير مفعّلة على الخادم حاليًا. تواصل مع الإدارة.',
+          'email-recipient-invalid': 'البريد الإلكتروني المسجل لهذا الحساب غير صالح.',
+        };
+        return jsonError('email-send-failed', 502, emailErrorMessages[result.error ?? ''] ?? 'تعذر إرسال البريد الإلكتروني، حاول لاحقًا.');
+      }
     } else {
       return jsonError('code-send-failed', 502, 'طريقة الإرسال غير متاحة لهذا الحساب.');
     }

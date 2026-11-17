@@ -641,6 +641,10 @@ export async function POST(request: Request) {
         return responseError('student-edit-window-expired', 403);
       }
       const updatePayload: Record<string, unknown> = { ...changes };
+      const classChanged = changes['الفئة'] !== undefined
+        && String(changes['الفئة']) !== String(row['الفئة'] ?? '');
+      const changedAt = classChanged ? new Date().toISOString() : '';
+      if (classChanged) updatePayload['تاريخ_تغيير_الفئة'] = changedAt;
       if (changes['الفئة']) {
         const year = changes['السنه الدراسية'] ?? studentYear(row);
         const { data: availableClasses, error: classesError } = await supabase.rpc('available_student_classes_for_year', { p_year: year });
@@ -652,10 +656,15 @@ export async function POST(request: Request) {
       if (changes['السنه الدراسية'] === 'أولى') updatePayload.force_password_change = true;
       const { error: updateError } = await supabase.from('students').update(updatePayload).eq('الرقم الجامعي', studentId);
       if (updateError) return responseError('student-update-failed', 500);
-      await audit(request, username, 'student_updated_by_degree4_supervisor', {
+      await audit(request, username, classChanged ? 'student_class_changed' : 'student_updated_by_degree4_supervisor', {
         ...studentAuditSnapshot(row),
         changedFields: Object.keys(changes),
         changes: auditChanges(row, changes),
+        ...(classChanged ? {
+          previousClass: String(row['الفئة'] ?? ''),
+          nextClass: changes['الفئة'],
+          changedAt,
+        } : {}),
       });
       return NextResponse.json({ success: true });
     }

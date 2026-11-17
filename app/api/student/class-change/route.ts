@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { writeServerAuditLog } from '../../../../lib/auditLogServer';
 import { buildClassChangeEmail, sendEmail } from '../../../../lib/email';
 import { buildStudentTelegramMessage, sendTelegramNotification } from '../../../../lib/telegram';
 import { createSupabaseAdminClient } from '../../../../lib/supabaseAdmin';
@@ -27,7 +28,7 @@ export async function POST(request: Request) {
     }
 
     const { data: student, error: studentError } = await supabase.from('students')
-      .select('"كلمة السر", "الفئة", "السنه الدراسية", "اسم الطالب", "البريد الإلكتروني", telegram_notifications_enabled, telegram_chat_id')
+      .select('"كلمة السر", "الفئة", "السنه الدراسية", "اسم الطالب", "اسم الاب", "الكنية", "البريد الإلكتروني", telegram_notifications_enabled, telegram_chat_id')
       .eq('الرقم الجامعي', studentId).maybeSingle();
     if (studentError) return NextResponse.json({ success: false, error: 'student-lookup-failed' }, { status: 500 });
     if (!student || String(student['كلمة السر'] ?? '') !== password) {
@@ -51,27 +52,55 @@ export async function POST(request: Request) {
       if (studentsError) return NextResponse.json({ success: false, error: 'student-classes-load-failed' }, { status: 500 });
       if ((occupied ?? 0) >= selectedClass.capacity) return NextResponse.json({ success: false, error: 'class-full' }, { status: 400 });
     }
+    const changedAt = new Date().toISOString();
     const { error: updateError } = await supabase.from('students').update({
       'الفئة': nextClass,
-      'تاريخ_تغيير_الفئة': new Date().toISOString(),
+      'تاريخ_تغيير_الفئة': changedAt,
     }).eq('الرقم الجامعي', studentId);
     if (updateError) return NextResponse.json({ success: false, error: 'student-update-failed' }, { status: 500 });
 
-    const studentName = String(student['اسم الطالب'] ?? 'الطالب');
+    const studentName = [
+      student['اسم الطالب'],
+      student['اسم الاب'],
+      student['الكنية'],
+    ].map((part) => String(part ?? '').trim()).filter(Boolean).join(' ') || 'الطالب';
+    let auditLogged = true;
+    try {
+      await writeServerAuditLog(request, {
+        action: 'student_class_changed',
+        userType: 'student',
+        userId: studentId,
+        username: studentName,
+        fullName: studentName,
+        details: {
+          studentId,
+          studentName,
+          year: String(student['السنه الدراسية'] ?? ''),
+          previousClass,
+          nextClass,
+          changedAt,
+        },
+      });
+    } catch (error) {
+      auditLogged = false;
+      console.error('[student-class-change] audit log insert failed:', error);
+    }
+
     const email = String(student['البريد الإلكتروني'] ?? '').trim();
-    const emailResult = email
-      ? await sendEmail({
+    const notificationsEnabled = Boolean(student.telegram_notifications_enabled);
+    const chatId = String(student.telegram_chat_id ?? '').trim();
+
+    // البريد وتيليجرام مستقلان، فنرسلهما معًا بدل الانتظار لكل واحد على حدة.
+    const sendClassChangeEmail = async () => email
+      ? sendEmail({
         to: email,
         subject: 'تغيير الفئة',
         html: buildClassChangeEmail({ studentName, previousClass, nextClass }),
       })
       : { success: false, error: 'student-email-missing' };
 
-    const notificationsEnabled = Boolean(student.telegram_notifications_enabled);
-    const chatId = String(student.telegram_chat_id ?? '').trim();
-    let telegramResult: { ok?: boolean; status?: string } = { status: 'disabled_or_missing_chat_id' };
-
-    if (notificationsEnabled && chatId) {
+    const sendClassChangeTelegram = async (): Promise<{ ok?: boolean; status?: string }> => {
+      if (!notificationsEnabled || !chatId) return { status: 'disabled_or_missing_chat_id' };
       const telegramMessage = buildStudentTelegramMessage({
         studentName,
         studentId,
@@ -80,10 +109,26 @@ export async function POST(request: Request) {
         statusText: `تم تغيير الفئة بنجاح من ${previousClass || 'غير محددة'} إلى ${nextClass}.`,
         title: 'تغيير الفئة',
       });
-      telegramResult = await sendTelegramNotification(telegramMessage, { chatId, enabled: true });
-    }
+      return sendTelegramNotification(telegramMessage, { chatId, enabled: true });
+    };
 
-    return NextResponse.json({ success: true, emailSent: emailResult.success, telegramSent: telegramResult.ok === true });
+    const [emailResult, telegramResult] = await Promise.all([
+      sendClassChangeEmail().catch((error) => {
+        console.error('Class change email failed:', error);
+        return { success: false, error: 'email-send-failed' };
+      }),
+      sendClassChangeTelegram().catch((error) => {
+        console.error('Class change telegram failed:', error);
+        return { ok: false, status: 'telegram_send_failed' };
+      }),
+    ]);
+
+    return NextResponse.json({
+      success: true,
+      emailSent: emailResult.success,
+      telegramSent: telegramResult.ok === true,
+      auditLogged,
+    });
   } catch (error) {
     console.error('Class change API failed:', error);
     return NextResponse.json({ success: false, error: 'class-change-failed' }, { status: 500 });

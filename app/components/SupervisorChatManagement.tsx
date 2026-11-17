@@ -146,7 +146,9 @@ export default function SupervisorChatManagement({
 
   useEffect(() => {
     void loadMessages(selectedYear, true);
-    const interval = window.setInterval(() => void loadMessages(selectedYear), 15000);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void loadMessages(selectedYear);
+    }, 15000);
     return () => {
       window.clearInterval(interval);
       messageRequestSequenceRef.current += 1;

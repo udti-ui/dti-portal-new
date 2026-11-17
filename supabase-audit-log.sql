@@ -36,6 +36,15 @@ create index if not exists system_logs_created_at_idx
 create index if not exists system_logs_user_idx
   on public."سجلات النظام" (user_type, user_id, username);
 
+create index if not exists system_logs_user_id_idx
+  on public."سجلات النظام" (user_id);
+
+create index if not exists system_logs_student_id_idx
+  on public."سجلات النظام" ((details ->> 'studentId'));
+
+create index if not exists system_logs_student_id_legacy_idx
+  on public."سجلات النظام" ((details ->> 'student_id'));
+
 create index if not exists system_logs_full_name_idx
   on public."سجلات النظام" (full_name);
 

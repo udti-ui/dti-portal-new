@@ -6,7 +6,7 @@ import { BrowserMultiFormatReader } from '@zxing/browser';
 import QRCode from 'qrcode';
 import { CheckCircle2, ScanLine, UserRound, X } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { writeAuditLog } from '../../lib/auditLog';
+import { writeAuditLog, writeAuditLogAndWait } from '../../lib/auditLog';
 import { isAttendanceBusinessHours } from '../../lib/attendanceHours';
 import { getClassAvailabilityOptions } from '../../lib/studentData';
 import { buildStudentTelegramMessage, sendTelegramNotification } from '../../lib/telegram';
@@ -425,7 +425,7 @@ const loadAdminRecords = async () => {
   };
 };
 
-const loadAuditLogs = async (username: string, password: string) => {
+const loadAuditLogs = async (username: string, password: string, studentId = '') => {
   const response = await fetch('/api/audit-log', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -433,6 +433,7 @@ const loadAuditLogs = async (username: string, password: string) => {
       mode: 'read',
       username,
       password,
+      studentId,
     }),
   });
   const result = await response.json() as { success?: boolean; error?: string; logs?: AdminRecord[] };
@@ -442,6 +443,7 @@ const loadAuditLogs = async (username: string, password: string) => {
       'supervisor-credentials-invalid': 'تعذر التحقق من حساب المشرف.',
       'audit-access-denied': 'عرض السجلات متاح لمشرف الدرجة الأولى فقط.',
       'audit-log-read-failed': 'تعذر قراءة سجلات النظام. تحقق من تشغيل supabase-audit-log.sql.',
+      'invalid-student-id': 'أدخل رقمًا جامعيًا صحيحًا.',
     };
     throw new Error(errorMessages[result.error ?? ''] ?? 'تعذر تحميل سجلات النظام.');
   }
@@ -1283,6 +1285,7 @@ export default function AttendancePage() {
   const [supervisorRecords, setSupervisorRecords] = useState<AdminRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminRecord[]>([]);
   const [auditLogSearch, setAuditLogSearch] = useState('');
+  const [auditLogStudentId, setAuditLogStudentId] = useState('');
   const [auditLogUserType, setAuditLogUserType] = useState('all');
   const [auditLogActionType, setAuditLogActionType] = useState('all');
   const [supervisorForm, setSupervisorForm] = useState({ username: '', password: '', degree: '3' });
@@ -1539,7 +1542,9 @@ export default function AttendancePage() {
     };
 
     void refreshStudentCheckIns();
-    const timer = window.setInterval(() => void refreshStudentCheckIns(), 4000);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshStudentCheckIns();
+    }, 4000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -1630,15 +1635,20 @@ export default function AttendancePage() {
     }
   };
 
-  const refreshAuditLogs = async () => {
+  const refreshAuditLogs = async (studentId = '') => {
     const password = supervisorPassword || window.prompt('أدخل كلمة مرور المشرف للتحقق من صلاحية عرض السجلات:') || '';
     if (!password) {
       setNotice('أدخل كلمة مرور المشرف لعرض السجلات.');
       return;
     }
+    if (studentId.trim()) {
+      setAuditLogSearch('');
+      setAuditLogUserType('all');
+      setAuditLogActionType('all');
+    }
     setAdminLoading(true);
     try {
-      setAuditLogs(await loadAuditLogs(supervisorUsername, password));
+      setAuditLogs(await loadAuditLogs(supervisorUsername, password, studentId));
     } catch (error) {
       setNotice(`تعذر تحميل سجلات النظام: ${getSupabaseErrorText(error)}`);
     } finally {
@@ -2199,6 +2209,9 @@ export default function AttendancePage() {
       const newValue = String(cleanPayload[field] ?? '').trim();
       return oldValue !== newValue;
     });
+    const classChanged = changedFields.includes('الفئة');
+    const changedAt = classChanged ? new Date().toISOString() : '';
+    if (classChanged) cleanPayload['تاريخ_تغيير_الفئة'] = changedAt;
 
     console.log('[attendance][student-update] payload', cleanPayload);
 
@@ -2228,20 +2241,33 @@ export default function AttendancePage() {
 
     console.log('[attendance][student-update] success', data);
 
-    setNotice('تم تحديث بيانات الطالب بنجاح');
-    writeAuditLog({
-      action: 'student_updated_by_supervisor',
-      userType: 'supervisor',
-      username: supervisorUsername,
-      fullName: supervisorUsername,
-      details: {
-        studentId: nextStudentId,
-        studentName: getFullStudentName(originalStudent ?? {}),
-        changedFields: changedFields.filter((field) => !/كلمة السر|password/i.test(field)),
-        classBefore: originalStudent?.['الفئة'],
-        classAfter: cleanPayload['الفئة'] ?? originalStudent?.['الفئة'],
-      },
-    });
+    let auditFailed = false;
+    try {
+      await writeAuditLogAndWait({
+        action: classChanged ? 'student_class_changed' : 'student_updated_by_supervisor',
+        userType: 'supervisor',
+        username: supervisorUsername,
+        fullName: supervisorUsername,
+        details: {
+          studentId: nextStudentId,
+          studentName: getFullStudentName(originalStudent ?? {}),
+          changedFields: changedFields.filter((field) => !/كلمة السر|password/i.test(field)),
+          classBefore: originalStudent?.['الفئة'],
+          classAfter: cleanPayload['الفئة'] ?? originalStudent?.['الفئة'],
+          ...(classChanged ? {
+            previousClass: originalStudent?.['الفئة'],
+            nextClass: cleanPayload['الفئة'],
+            changedAt,
+          } : {}),
+        },
+      });
+    } catch (error) {
+      auditFailed = true;
+      console.error('[attendance][student-update] audit log failed:', error);
+    }
+    setNotice(auditFailed
+      ? 'تم تحديث بيانات الطالب، لكن تعذر حفظ العملية في سجل النظام؛ يرجى إبلاغ الإدارة التقنية.'
+      : 'تم تحديث بيانات الطالب بنجاح');
     setEditingStudentId('');
     setEditingStudentDraft({});
     await refreshStudentDirectory();
@@ -4834,6 +4860,24 @@ export default function AttendancePage() {
             </div>
             <div className="audit-log-filters">
               <label>
+                <span>عرض سجل طالب كامل بالرقم الجامعي</span>
+                <input
+                  inputMode="numeric"
+                  dir="ltr"
+                  value={auditLogStudentId}
+                  onChange={(event) => setAuditLogStudentId(event.target.value)}
+                  placeholder="الرقم الجامعي"
+                />
+              </label>
+              <button
+                type="button"
+                className="action-button primary"
+                onClick={() => void refreshAuditLogs(auditLogStudentId)}
+                disabled={adminLoading || !auditLogStudentId.trim()}
+              >
+                عرض سجل الطالب
+              </button>
+              <label>
                 <span>بحث بالاسم أو الرقم أو عنوان IP</span>
                 <input value={auditLogSearch} onChange={(event) => setAuditLogSearch(event.target.value)} placeholder="ابحث في المستخدمين والعمليات..." />
               </label>
@@ -4888,7 +4932,18 @@ export default function AttendancePage() {
                     const parsedCreatedAt = new Date(createdAt);
                     return (
                       <tr key={`${getAdminRecordValue(log, ['log_id'])}-${index}`}>
-                        <td>{createdAt && !Number.isNaN(parsedCreatedAt.getTime()) ? parsedCreatedAt.toLocaleString('ar-SY') : createdAt || '—'}</td>
+                        <td>{createdAt && !Number.isNaN(parsedCreatedAt.getTime())
+                          ? parsedCreatedAt.toLocaleString('ar-SY', {
+                            timeZone: 'Asia/Damascus',
+                            year: 'numeric',
+                            month: '2-digit',
+                            day: '2-digit',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                            second: '2-digit',
+                            hour12: false,
+                          })
+                          : createdAt || '—'}</td>
                         <td>
                           <strong>{String(getAdminRecordValue(log, ['full_name']) || getAdminRecordValue(log, ['username']) || 'غير محدد')}</strong>
                           <small>{String(getAdminRecordValue(log, ['username']) || '')}{getAdminRecordValue(log, ['user_id']) ? ` · ${String(getAdminRecordValue(log, ['user_id']))}` : ''}</small>

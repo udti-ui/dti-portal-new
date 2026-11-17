@@ -181,9 +181,20 @@ const extractGrades = (rows: Record<string, unknown>[]): GradeEntry[] => {
   });
 };
 
-const getTableRows = async (tableNames: string[], select = '*') => {
+const getTableRows = async (
+  tableNames: string[],
+  options: { select?: string; studentId?: string } = {}
+) => {
+  const select = options.select ?? '*';
+  const studentId = options.studentId?.trim();
   for (const tableName of tableNames) {
-    const { data, error } = await supabase.from(tableName).select(select).limit(1);
+    // نطلب صفوف الطالب فقط من الخادم بدل تنزيل الجدول كاملًا (كان يُقرأ سطر واحد فقط بسبب limit(1)).
+    const base = supabase.from(tableName).select(select);
+    let { data, error } = await (studentId ? base.eq('الرقم الجامعي', studentId) : base.limit(1));
+    if (error && studentId && /column/i.test(String(error.message || ''))) {
+      // الجدول لا يحتوي العمود المتوقع: نرجع لقراءة محدودة ويتولى المستدعي التصفية.
+      ({ data, error } = await supabase.from(tableName).select(select).limit(500));
+    }
     if (!error) return { data: data ?? [], tableName };
     const message = String(error.message || '');
     if (message.includes('does not exist') || message.includes('not found') || message.includes('relation')) {
@@ -260,6 +271,13 @@ export default function Home() {
   const [firstLoginPassword, setFirstLoginPassword] = useState('');
   const [firstLoginPasswordConfirm, setFirstLoginPasswordConfirm] = useState('');
   const [firstLoginPasswordSaving, setFirstLoginPasswordSaving] = useState(false);
+  const [firstLoginVerificationRequired, setFirstLoginVerificationRequired] = useState(false);
+  const [firstLoginContact, setFirstLoginContact] = useState('');
+  const [firstLoginContactVerified, setFirstLoginContactVerified] = useState(false);
+  const [firstLoginCode, setFirstLoginCode] = useState('');
+  const [firstLoginCodeSent, setFirstLoginCodeSent] = useState(false);
+  const [firstLoginDestination, setFirstLoginDestination] = useState('');
+  const [firstLoginCodeSending, setFirstLoginCodeSending] = useState(false);
   const [grades, setGrades] = useState<GradeEntry[]>([]);
   const [teacherGrades, setTeacherGrades] = useState<TeacherGrade[]>([]);
   const [teacherGradesLoading, setTeacherGradesLoading] = useState(false);
@@ -438,7 +456,9 @@ export default function Home() {
     };
 
     void refreshChatStatus();
-    const interval = window.setInterval(() => void refreshChatStatus(), 15000);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshChatStatus();
+    }, 15000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
@@ -1044,7 +1064,7 @@ export default function Home() {
           String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? '')
         ).then((rows) => ({ data: rows, error: null as Error | null }))
           .catch((error: unknown) => ({ data: [] as Record<string, unknown>[], error: error instanceof Error ? error : new Error(String(error)) })),
-        getTableRows(['الاعمال', 'الأعمال', 'أعمال', 'العملي', 'النظري']).then(({ data }) => ({
+        getTableRows(['الاعمال', 'الأعمال', 'أعمال', 'العملي', 'النظري'], { studentId }).then(({ data }) => ({
           data: Array.isArray(data) ? data.filter((row) => {
             const rowRecord = row as unknown as Record<string, unknown>;
             const rowStudentId = getValueByKeys(rowRecord, ['الرقم الجامعي', 'student_id', 'studentId']);
@@ -1539,8 +1559,8 @@ export default function Home() {
     void refreshDashboard();
 
     const intervalId = window.setInterval(() => {
-      void refreshDashboard();
-    }, 15000);
+      if (document.visibilityState === 'visible') void refreshDashboard();
+    }, 60000);
 
     const handleFocus = () => {
       void refreshDashboard();
@@ -1568,9 +1588,9 @@ export default function Home() {
     const studentId = loginData.studentId.trim();
     const password = loginData.password.trim();
 
-    if (!studentId || !password) {
-      setNotice('يرجى إدخال الرقم الجامعي وكلمة السر');
-      setToast({ message: 'يرجى إدخال الرقم الجامعي وكلمة السر', type: 'error' });
+    if (!studentId) {
+      setNotice('يرجى إدخال الرقم الجامعي');
+      setToast({ message: 'يرجى إدخال الرقم الجامعي', type: 'error' });
       return;
     }
 
@@ -1587,7 +1607,24 @@ export default function Home() {
       }
 
       const storedPassword = String(getRecordValue(user as Record<string, unknown>, ['كلمة السر', 'password']) ?? '').trim();
-      if (storedPassword !== password) {
+      const record = user as Record<string, unknown>;
+      const forcePasswordChange = record.force_password_change === true
+        || ['true', '1', 'yes'].includes(String(record.force_password_change ?? '').toLocaleLowerCase());
+      const studentYear = normalizeStudentYear(getRecordValue(record, ['السنه الدراسية', 'السنة الدراسية', 'year', 'student_year']));
+      if (forcePasswordChange && !storedPassword) {
+        setFirstLoginStudent(user as StudentRow);
+        setFirstLoginVerificationRequired(true);
+        setFirstLoginContact('');
+        setFirstLoginContactVerified(false);
+        setFirstLoginCode('');
+        setFirstLoginCodeSent(false);
+        setFirstLoginPassword('');
+        setFirstLoginPasswordConfirm('');
+        setNotice('أكمل التحقق من بياناتك لتعيين كلمة مرور حسابك لأول مرة.');
+        return;
+      }
+
+      if (!password || storedPassword !== password) {
         setNotice('كلمة السر غير صحيحة');
         setToast({ message: 'كلمة السر غير صحيحة', type: 'error' });
         return;
@@ -1600,12 +1637,9 @@ export default function Home() {
         telegram_notifications_enabled: preference
       } as StudentRow;
 
-      const record = user as Record<string, unknown>;
-      const forcePasswordChange = record.force_password_change === true
-        || ['true', '1', 'yes'].includes(String(record.force_password_change ?? '').toLocaleLowerCase());
-      const studentYear = normalizeStudentYear(getRecordValue(record, ['السنه الدراسية', 'السنة الدراسية', 'year', 'student_year']));
       if (forcePasswordChange && studentYear === 'أولى') {
         setFirstLoginStudent(hydratedUser);
+        setFirstLoginVerificationRequired(false);
         setFirstLoginPassword('');
         setFirstLoginPasswordConfirm('');
         setNotice('لأمان حسابك، يجب تعيين كلمة مرور جديدة قبل المتابعة.');
@@ -1649,9 +1683,70 @@ export default function Home() {
     }
   };
 
+  const startFirstLoginVerification = async (emailFallback = false) => {
+    if (!firstLoginStudent) return;
+    if (!emailFallback && !firstLoginContact.trim()) {
+      setNotice('أدخل رقم الموبايل المسجل بدون الصفر الأول أو البريد الإلكتروني.');
+      return;
+    }
+
+    setFirstLoginCodeSending(true);
+    try {
+      const response = await fetch('/api/student/first-login-password/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          studentId: String(firstLoginStudent['الرقم الجامعي'] ?? '').trim(),
+          contact: firstLoginContact,
+          emailFallback,
+        }),
+      });
+      const result = await response.json() as { success?: boolean; verified?: boolean; error?: string; destination?: string };
+      if (!response.ok || !result.success) {
+        const messages: Record<string, string> = {
+          'first-login-contact-mismatch': 'رقم الموبايل أو البريد لا يطابق البيانات المسجلة.',
+          'first-login-code-recently-sent': 'تم إرسال رمز مؤخرًا. انتظر دقيقة قبل طلب رمز جديد.',
+          'first-login-email-missing': 'لا يوجد بريد إلكتروني صالح مسجل لهذا الطالب.',
+          'first-login-code-email-failed': 'تعذر إرسال الرمز إلى البريد الإلكتروني.',
+          'first-login-code-table-unavailable': 'خدمة التفعيل غير مهيأة في قاعدة البيانات.',
+          'first-login-setup-not-required': 'هذا الحساب لا يحتاج إلى تفعيل لأول مرة.',
+        };
+        setNotice(messages[result.error ?? ''] ?? 'تعذر إرسال رمز التحقق. حاول مرة أخرى.');
+        return;
+      }
+
+      if (result.verified) {
+        setFirstLoginContactVerified(true);
+        setFirstLoginCodeSent(false);
+        setFirstLoginCode('');
+        setNotice('تم التحقق من بياناتك. اختر كلمة المرور للمتابعة دون إرسال رسالة.');
+        return;
+      }
+
+      setFirstLoginContactVerified(false);
+      setFirstLoginCodeSent(true);
+      setFirstLoginCode('');
+      setFirstLoginDestination(result.destination ?? 'البريد الإلكتروني المسجل');
+      setNotice(`أرسلنا رمز التحقق إلى ${result.destination ?? 'البريد الإلكتروني المسجل'}.`);
+    } catch (error) {
+      console.error('First-login code request failed:', error);
+      setNotice('تعذر الاتصال بخدمة التفعيل. حاول مرة أخرى.');
+    } finally {
+      setFirstLoginCodeSending(false);
+    }
+  };
+
   const handleFirstLoginPasswordChange = async (event: FormEvent) => {
     event.preventDefault();
     if (!firstLoginStudent) return;
+    if (firstLoginVerificationRequired && !firstLoginContactVerified && !firstLoginCodeSent) {
+      setNotice('تحقق من رقم الموبايل أو البريد أولًا، أو اطلب رمزًا إلى بريدك المسجل.');
+      return;
+    }
+    if (firstLoginVerificationRequired && firstLoginCodeSent && !firstLoginContactVerified && !/^\d{6}$/.test(firstLoginCode)) {
+      setNotice('أدخل رمز التحقق المكوّن من 6 أرقام.');
+      return;
+    }
     if (firstLoginPassword.length < 8) {
       setNotice('كلمة المرور يجب ألا تقل عن 8 محارف.');
       return;
@@ -1665,14 +1760,26 @@ export default function Home() {
     try {
       const studentId = String(firstLoginStudent['الرقم الجامعي'] ?? '').trim();
       const currentPassword = String(getRecordValue(firstLoginStudent as Record<string, unknown>, ['كلمة السر', 'password']) ?? '');
-      const response = await fetch('/api/student/first-login-password', {
+      const response = await fetch(firstLoginVerificationRequired
+        ? '/api/student/first-login-password/verify'
+        : '/api/student/first-login-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentId, currentPassword, newPassword: firstLoginPassword }),
+        body: JSON.stringify(firstLoginVerificationRequired
+          ? firstLoginContactVerified
+            ? { studentId, contact: firstLoginContact, newPassword: firstLoginPassword }
+            : { studentId, code: firstLoginCode, newPassword: firstLoginPassword }
+          : { studentId, currentPassword, newPassword: firstLoginPassword }),
       });
       const result = await response.json() as { success?: boolean; error?: string; auditWarning?: boolean };
       if (!response.ok || !result.success) {
-        setNotice(`تعذر تغيير كلمة المرور: ${result.error || 'خطأ غير معروف'}`);
+        const messages: Record<string, string> = {
+          'invalid-or-expired-first-login-code': 'رمز التحقق غير صحيح أو انتهت صلاحيته.',
+          'first-login-contact-mismatch': 'رقم الموبايل أو البريد لا يطابق البيانات المسجلة.',
+          'too-many-first-login-attempts': 'تجاوزت عدد المحاولات. اطلب رمزًا جديدًا بعد انتهاء مهلة الإرسال.',
+          'first-login-setup-not-required': 'انتهى إعداد هذا الحساب بالفعل. سجّل الدخول بكلمة مرورك الجديدة.',
+        };
+        setNotice(messages[result.error ?? ''] ?? `تعذر تغيير كلمة المرور: ${result.error || 'خطأ غير معروف'}`);
         return;
       }
 
@@ -1689,6 +1796,12 @@ export default function Home() {
       setActiveTab('announcements');
       setIsLoggedIn(true);
       setFirstLoginStudent(null);
+      setFirstLoginVerificationRequired(false);
+      setFirstLoginContact('');
+      setFirstLoginContactVerified(false);
+      setFirstLoginCode('');
+      setFirstLoginCodeSent(false);
+      setFirstLoginDestination('');
       setFirstLoginPassword('');
       setFirstLoginPasswordConfirm('');
       if (rememberStudentId) {
@@ -1829,7 +1942,7 @@ export default function Home() {
           nextClass,
         }),
       });
-      const result = await response.json() as { success?: boolean; error?: string; emailSent?: boolean; telegramSent?: boolean };
+      const result = await response.json() as { success?: boolean; error?: string; emailSent?: boolean; telegramSent?: boolean; auditLogged?: boolean };
       if (!result.success) {
         const changeErrors: Record<string, string> = {
           'class-full': 'لا توجد مقاعد متاحة في هذه الفئة.',
@@ -1854,20 +1967,18 @@ export default function Home() {
         result.emailSent ? 'البريد الإلكتروني' : '',
         result.telegramSent ? 'التليجرام' : '',
       ].filter(Boolean).join(' و ');
-      setNotice(notificationText
+      const auditWarning = result.auditLogged === false
+        ? ' تعذر حفظ تغيير الفئة في سجل النظام؛ يرجى إبلاغ الإدارة.'
+        : '';
+      setNotice(`${notificationText
         ? `تم تغيير الفئة إلى ${nextClass} وإرسال إشعار عبر ${notificationText}.`
-        : `تم تغيير الفئة إلى ${nextClass}.`);
-      setToast({ message: `تم تغيير الفئة إلى ${nextClass}`, type: 'success' });
+        : `تم تغيير الفئة إلى ${nextClass}.`}${auditWarning}`);
+      setToast({
+        message: auditWarning ? 'تم تغيير الفئة لكن تعذر تسجيلها في السجل' : `تم تغيير الفئة إلى ${nextClass}`,
+        type: auditWarning ? 'error' : 'success',
+      });
 
       await refreshClassOptions();
-      writeAuditLog({
-        action: 'student_class_changed',
-        userType: 'student',
-        userId: loggedStudent?.['الرقم الجامعي'],
-        username: studentFullName,
-        fullName: studentFullName,
-        details: { previousClass: currentClass, nextClass },
-      });
     } catch {
       setNotice('حدث خطأ أثناء تغيير الفئة');
       setToast({ message: 'حدث خطأ أثناء تغيير الفئة', type: 'error' });
@@ -2042,7 +2153,7 @@ export default function Home() {
             <h3>جامعة اللاذقية</h3>
           </div>
 
-          <h1 className="login-title">{firstLoginStudent ? 'تغيير كلمة المرور لأول مرة' : showPasswordReset ? 'إعادة تعيين كلمة المرور' : 'استعلام قسم تعويضات أسنان'}</h1>
+          <h1 className="login-title">{firstLoginStudent ? 'تفعيل الحساب لأول مرة' : showPasswordReset ? 'إعادة تعيين كلمة المرور' : 'استعلام قسم تعويضات أسنان'}</h1>
 
           <form onSubmit={handleLogin} className="login-form" style={firstLoginStudent ? { display: 'none' } : undefined}>
             <div className="form-group">
@@ -2050,7 +2161,7 @@ export default function Home() {
                 type="text"
                 value={loginData.studentId}
                 onChange={(event) => setLoginData({ ...loginData, studentId: event.target.value })}
-                placeholder="الرقم الجامعي"
+                placeholder="الرقم الجامعي (مع الصفر الأول أو بدونه)"
                 inputMode="numeric"
                 required
                 disabled={isLoading}
@@ -2064,8 +2175,7 @@ export default function Home() {
                 onChange={(event) => setLoginData({ ...loginData, password: event.target.value })}
                 onKeyDown={(event) => setCapsLockOn(event.getModifierState ? event.getModifierState('CapsLock') : false)}
                 onKeyUp={(event) => setCapsLockOn(event.getModifierState ? event.getModifierState('CapsLock') : false)}
-                placeholder="كلمة السر"
-                required
+                placeholder="كلمة السر (اتركها فارغة عند أول دخول)"
                 disabled={isLoading}
               />
               <button
@@ -2106,30 +2216,97 @@ export default function Home() {
 
           {firstLoginStudent && (
             <form onSubmit={(event) => void handleFirstLoginPasswordChange(event)} className="password-reset-panel">
-              <p>مرحباً {String(firstLoginStudent['اسم الطالب'] ?? '')}. يجب تغيير كلمة المرور قبل فتح حسابك.</p>
-              <input
-                type="password"
-                autoComplete="new-password"
-                minLength={8}
-                value={firstLoginPassword}
-                onChange={(event) => setFirstLoginPassword(event.target.value)}
-                placeholder="كلمة المرور الجديدة - 8 محارف على الأقل"
-                required
-                disabled={firstLoginPasswordSaving}
-              />
-              <input
-                type="password"
-                autoComplete="new-password"
-                minLength={8}
-                value={firstLoginPasswordConfirm}
-                onChange={(event) => setFirstLoginPasswordConfirm(event.target.value)}
-                placeholder="تأكيد كلمة المرور الجديدة"
-                required
-                disabled={firstLoginPasswordSaving}
-              />
-              <button type="submit" className="login-button password-reset-action" disabled={firstLoginPasswordSaving}>
-                {firstLoginPasswordSaving ? 'جارٍ حفظ كلمة المرور...' : 'تغيير كلمة المرور والمتابعة'}
-              </button>
+              <p>مرحباً {String(firstLoginStudent['اسم الطالب'] ?? '')}. {firstLoginVerificationRequired
+                ? 'أدخل رقم الموبايل المسجل بدون الصفر الأول أو بريدك الإلكتروني. إذا طابقت البيانات، يمكنك تعيين كلمة المرور مباشرة. وإذا نسيتها، أرسل رمزًا إلى بريدك المسجل.'
+                : 'يجب تغيير كلمة المرور قبل فتح حسابك.'}</p>
+              {firstLoginVerificationRequired && (
+                <>
+                  <input
+                    type="text"
+                    inputMode="tel"
+                    autoComplete="off"
+                    value={firstLoginContact}
+                    onChange={(event) => setFirstLoginContact(event.target.value)}
+                    placeholder="رقم الموبايل بدون الصفر الأول أو البريد الإلكتروني"
+                    disabled={firstLoginCodeSending || firstLoginContactVerified || firstLoginCodeSent}
+                  />
+                  <button
+                    type="button"
+                    className="login-button password-reset-action"
+                    onClick={() => void startFirstLoginVerification()}
+                    disabled={firstLoginCodeSending || firstLoginContactVerified || firstLoginCodeSent}
+                  >
+                    {firstLoginCodeSending
+                      ? 'جارٍ التحقق...'
+                      : firstLoginContactVerified
+                        ? 'تم التحقق من البيانات'
+                        : firstLoginCodeSent
+                          ? 'تم إرسال الرمز'
+                          : 'التحقق والمتابعة'}
+                  </button>
+                  {!firstLoginCodeSent && !firstLoginContactVerified && (
+                    <button
+                      type="button"
+                      className="password-reset-resend"
+                      onClick={() => void startFirstLoginVerification(true)}
+                      disabled={firstLoginCodeSending}
+                    >
+                      لا أتذكر بياناتي، أرسل الرمز إلى بريدي المسجل
+                    </button>
+                  )}
+                  {firstLoginCodeSent && (
+                    <>
+                      <div className="password-reset-destination">أرسلنا الرمز إلى {firstLoginDestination}</div>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={6}
+                        value={firstLoginCode}
+                        onChange={(event) => setFirstLoginCode(event.target.value.replace(/\D/g, ''))}
+                        placeholder="رمز التحقق - 6 أرقام"
+                        required
+                        disabled={firstLoginPasswordSaving}
+                      />
+                      <button
+                        type="button"
+                        className="password-reset-resend"
+                        onClick={() => void startFirstLoginVerification(true)}
+                        disabled={firstLoginCodeSending}
+                      >
+                        إرسال رمز جديد
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+              {(!firstLoginVerificationRequired || firstLoginContactVerified || firstLoginCodeSent) && (
+                <>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                    value={firstLoginPassword}
+                    onChange={(event) => setFirstLoginPassword(event.target.value)}
+                    placeholder="كلمة المرور الجديدة - 8 محارف على الأقل"
+                    required
+                    disabled={firstLoginPasswordSaving}
+                  />
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    minLength={8}
+                    value={firstLoginPasswordConfirm}
+                    onChange={(event) => setFirstLoginPasswordConfirm(event.target.value)}
+                    placeholder="تأكيد كلمة المرور الجديدة"
+                    required
+                    disabled={firstLoginPasswordSaving}
+                  />
+                  <button type="submit" className="login-button password-reset-action" disabled={firstLoginPasswordSaving}>
+                    {firstLoginPasswordSaving ? 'جارٍ حفظ كلمة المرور...' : 'حفظ كلمة المرور والمتابعة'}
+                  </button>
+                </>
+              )}
             </form>
           )}
 

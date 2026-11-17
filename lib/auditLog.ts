@@ -15,15 +15,17 @@ const getDeviceId = () => {
   return generated;
 };
 
-export const writeAuditLog = (input: {
+type AuditLogInput = {
   action: string;
   userType: AuditUserType;
   userId?: string | number | null;
   username?: string | null;
   fullName?: string | null;
   details?: AuditDetails;
-}) => {
-  if (typeof window === 'undefined') return;
+};
+
+const buildAuditPayload = (input: AuditLogInput) => {
+  if (typeof window === 'undefined') return null;
 
   let userType = input.userType;
   if (userType === 'supervisor') {
@@ -56,16 +58,33 @@ export const writeAuditLog = (input: {
     details: input.details ?? {},
   };
 
-  void fetch('/api/audit-log', {
+  return payload;
+};
+
+export const writeAuditLogAndWait = async (input: AuditLogInput) => {
+  const payload = buildAuditPayload(input);
+  if (!payload) return;
+
+  const response = await fetch('/api/audit-log', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
     keepalive: true,
-  }).then(async (response) => {
-    if (response.ok) return;
-    const result = await response.json().catch(() => ({})) as { error?: string };
-    console.error('[audit] log insert failed:', result.error || response.statusText);
-  }).catch((error: unknown) => {
+  });
+  if (response.ok) return;
+
+  let errorMessage = response.statusText;
+  try {
+    const result = await response.json() as { error?: string };
+    errorMessage = result.error || errorMessage;
+  } catch {
+    // Keep the HTTP status text when the response is not JSON.
+  }
+  throw new Error(errorMessage || 'Audit log insert failed.');
+};
+
+export const writeAuditLog = (input: AuditLogInput) => {
+  void writeAuditLogAndWait(input).catch((error: unknown) => {
     console.error('[audit] log request failed:', error);
   });
 };

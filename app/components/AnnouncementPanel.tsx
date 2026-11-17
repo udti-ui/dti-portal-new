@@ -65,7 +65,7 @@ const getErrorMessage = (error: string | undefined) => {
     'announcement-read-failed': 'تعذر تحديث حالة قراءة الإعلان.',
     'announcement-not-found': 'الإعلان غير موجود.',
     'announcement-schema-not-configured': 'يجب تشغيل ملف supabase-announcements.sql في Supabase أولًا.',
-    'announcement-attachment-invalid': 'نوع الملف غير مدعوم أو تجاوز حجمه 5 ميغابايت.',
+    'announcement-attachment-invalid': 'نوع الملف غير مدعوم أو تجاوز حجمه 4 ميغابايت.',
     'announcement-attachment-save-failed': 'تعذر حفظ المرفق. تحقق من إعداد مخزن الإعلانات في Supabase.',
     'announcement-attachment-load-failed': 'تعذر تجهيز رابط المرفق. حاول مرة أخرى.',
     'supervisor-credentials-invalid': 'بيانات المشرف غير صحيحة أو لا يملك صلاحية النشر.',
@@ -218,7 +218,9 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
       }
     };
     void load(true);
-    const intervalId = window.setInterval(() => void load(false), 60_000);
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load(false);
+    }, 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
@@ -497,7 +499,7 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
           <textarea value={content} onChange={(event) => setContent(event.target.value)} maxLength={4000} rows={5} />
         </label>
         <label className="announcement-form-content">
-          <span>مرفق (صورة أو PDF أو Word أو TXT، حتى 5 ميغابايت)</span>
+          <span>مرفق (صورة أو PDF أو Word أو TXT، حتى 4 ميغابايت)</span>
           <input
             type="file"
             accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
