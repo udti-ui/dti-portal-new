@@ -10,7 +10,7 @@ const isAuditUserType = (value: string): value is 'student' | 'teacher' | 'super
   ['student', 'teacher', 'supervisor', 'support_supervisor', 'system'].includes(value);
 const normalize = (value: unknown) => clean(value, 200).replace(/\s+/g, '').toLocaleLowerCase();
 
-const readAuditLogs = async (username: string, password: string, studentId: string) => {
+const readAuditLogs = async (username: string, password: string, studentId: string, offset: number) => {
   const supabase = createSupabaseAdminClient();
   if (!supabase) return NextResponse.json({ success: false, error: 'audit-service-not-configured' }, { status: 503 });
   if (!username || !password) return NextResponse.json({ success: false, error: 'supervisor-credentials-required' }, { status: 400 });
@@ -45,28 +45,26 @@ const readAuditLogs = async (username: string, password: string, studentId: stri
     `details->>studentId.eq.${id}`,
     `details->>student_id.eq.${id}`,
   ]).join(',');
-  const logs: Record<string, unknown>[] = [];
-  const pageSize = 1000;
+  const pageSize = 100;
+  let query = supabase.from('سجلات النظام')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .order('log_id', { ascending: false })
+    .range(offset, offset + pageSize - 1);
+  if (studentFilters) query = query.or(studentFilters);
 
-  for (let offset = 0; ; offset += pageSize) {
-    let query = supabase.from('سجلات النظام')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + pageSize - 1);
-    if (studentFilters) query = query.or(studentFilters);
-
-    const { data, error } = await query;
-    if (error) {
-      console.error('[audit] log read failed:', error.message);
-      return NextResponse.json({ success: false, error: 'audit-log-read-failed' }, { status: 500 });
-    }
-
-    const page = (data ?? []) as Record<string, unknown>[];
-    logs.push(...page);
-    if (page.length < pageSize) break;
+  const { data, error } = await query;
+  if (error) {
+    console.error('[audit] log read failed:', error.message);
+    return NextResponse.json({ success: false, error: 'audit-log-read-failed' }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, logs });
+  const logs = (data ?? []) as Record<string, unknown>[];
+  return NextResponse.json({
+    success: true,
+    logs,
+    nextOffset: logs.length === pageSize ? offset + pageSize : null,
+  });
 };
 
 export async function POST(request: Request) {
@@ -84,10 +82,14 @@ export async function POST(request: Request) {
   const payload = body as Record<string, unknown>;
   if (payload.mode === 'read') {
     const studentId = arabicDigits(clean(payload.studentId, 40)).replace(/\s+/g, '');
+    const offset = payload.offset === undefined ? 0 : Number(payload.offset);
     if (studentId && !/^\d+$/.test(studentId)) {
       return NextResponse.json({ success: false, error: 'invalid-student-id' }, { status: 400 });
     }
-    return readAuditLogs(clean(payload.username, 160), clean(payload.password, 300), studentId);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10000000) {
+      return NextResponse.json({ success: false, error: 'invalid-audit-offset' }, { status: 400 });
+    }
+    return readAuditLogs(clean(payload.username, 160), clean(payload.password, 300), studentId, offset);
   }
 
   const action = clean(payload.action, 120);

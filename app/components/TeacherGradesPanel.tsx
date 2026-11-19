@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { Award, Download, FileUp, Pencil, Save, Send, Trash2, X } from 'lucide-react';
+import { writeAuditLog } from '../../lib/auditLog';
 
 type TeacherStudent = {
   id: string;
@@ -15,16 +16,18 @@ type GradeSettings = {
   includePracticalStudy: boolean;
   includeTheoryExam: boolean;
   includePracticalExam: boolean;
+  includeLabCommitment: boolean;
   maxCard: number;
   maxActivity: number;
   maxTheoryStudy: number;
   maxPracticalStudy: number;
   maxTheoryExam: number;
   maxPracticalExam: number;
+  maxLabCommitment: number;
 };
-type GradeCeiling = 'maxCard' | 'maxActivity' | 'maxTheoryStudy' | 'maxPracticalStudy' | 'maxTheoryExam' | 'maxPracticalExam';
+type GradeCeiling = 'maxCard' | 'maxActivity' | 'maxTheoryStudy' | 'maxPracticalStudy' | 'maxTheoryExam' | 'maxPracticalExam' | 'maxLabCommitment';
 
-type GradeComponent = 'card' | 'activity' | 'theoryStudy' | 'practicalStudy' | 'theoryExam' | 'practicalExam';
+type GradeComponent = 'card' | 'activity' | 'theoryStudy' | 'practicalStudy' | 'theoryExam' | 'practicalExam' | 'labCommitment';
 type GradeRecord = {
   id: number | string;
   subject: string;
@@ -49,12 +52,14 @@ const defaultSettings: GradeSettings = {
   includePracticalStudy: false,
   includeTheoryExam: true,
   includePracticalExam: false,
+  includeLabCommitment: false,
   maxCard: 10,
   maxActivity: 10,
   maxTheoryStudy: 20,
   maxPracticalStudy: 20,
   maxTheoryExam: 100,
   maxPracticalExam: 100,
+  maxLabCommitment: 10,
 };
 
 const componentLabels: Record<GradeComponent, string> = {
@@ -64,11 +69,12 @@ const componentLabels: Record<GradeComponent, string> = {
   practicalStudy: 'مذاكرة عملية',
   theoryExam: 'امتحان نظري',
   practicalExam: 'امتحان عملي',
+  labCommitment: 'الحضور والالتزام المخبري',
 };
 
 const componentOptions: Array<{ key: GradeComponent; includeKey: keyof Pick<
   GradeSettings,
-  'includeCard' | 'includeActivity' | 'includeTheoryStudy' | 'includePracticalStudy' | 'includeTheoryExam' | 'includePracticalExam'
+  'includeCard' | 'includeActivity' | 'includeTheoryStudy' | 'includePracticalStudy' | 'includeTheoryExam' | 'includePracticalExam' | 'includeLabCommitment'
 > }> = [
   { key: 'card', includeKey: 'includeCard' },
   { key: 'activity', includeKey: 'includeActivity' },
@@ -76,6 +82,7 @@ const componentOptions: Array<{ key: GradeComponent; includeKey: keyof Pick<
   { key: 'practicalStudy', includeKey: 'includePracticalStudy' },
   { key: 'theoryExam', includeKey: 'includeTheoryExam' },
   { key: 'practicalExam', includeKey: 'includePracticalExam' },
+  { key: 'labCommitment', includeKey: 'includeLabCommitment' },
 ];
 
 const getComponentMaximum = (settings: GradeSettings, component: GradeComponent) => {
@@ -86,6 +93,7 @@ const getComponentMaximum = (settings: GradeSettings, component: GradeComponent)
     case 'practicalStudy': return settings.maxPracticalStudy;
     case 'theoryExam': return settings.maxTheoryExam;
     case 'practicalExam': return settings.maxPracticalExam;
+    case 'labCommitment': return settings.maxLabCommitment;
   }
 };
 
@@ -98,22 +106,28 @@ const getSettings = (row: Record<string, unknown>): GradeSettings => ({
     : row.has_studies === true && row.has_practical === true,
   includeTheoryExam: typeof row.include_theory_exam === 'boolean' ? row.include_theory_exam : true,
   includePracticalExam: typeof row.include_practical_exam === 'boolean' ? row.include_practical_exam : row.has_practical === true,
+  includeLabCommitment: typeof row.include_lab_commitment === 'boolean' ? row.include_lab_commitment : false,
   maxCard: Number(row.max_card),
   maxActivity: Number(row.max_activity),
   maxTheoryStudy: Number(row.max_theory_study),
   maxPracticalStudy: Number(row.max_practical_study),
   maxTheoryExam: Number(row.max_theory_exam),
   maxPracticalExam: Number(row.max_practical_exam),
+  maxLabCommitment: Number(row.max_lab_commitment),
 });
 
 export default function TeacherGradesPanel({
   username,
   password,
+  teacherId,
+  teacherName,
   selectedSubject,
   students,
 }: {
   username: string;
   password: string;
+  teacherId: string;
+  teacherName: string;
   selectedSubject: string;
   students: TeacherStudent[];
 }) {
@@ -130,6 +144,7 @@ export default function TeacherGradesPanel({
   const [savingSettings, setSavingSettings] = useState(false);
   const [savingGrade, setSavingGrade] = useState(false);
   const [importingGrades, setImportingGrades] = useState(false);
+  const [exportingGradeRegister, setExportingGradeRegister] = useState(false);
   const [sendingGradeNotifications, setSendingGradeNotifications] = useState(false);
   const [deletingGrade, setDeletingGrade] = useState<string | null>(null);
   const [deletingGroup, setDeletingGroup] = useState(false);
@@ -137,6 +152,17 @@ export default function TeacherGradesPanel({
   const [gradeImportReport, setGradeImportReport] = useState<GradeImportReport | null>(null);
   const [notice, setNotice] = useState<{ message: string; type: 'error' | 'success' } | null>(null);
   const [templateComponents, setTemplateComponents] = useState<GradeComponent[] | null>(null);
+
+  const logGradeActivity = (action: string, details: Record<string, unknown>) => {
+    writeAuditLog({
+      action,
+      userType: 'teacher',
+      userId: teacherId,
+      username,
+      fullName: teacherName,
+      details,
+    });
+  };
 
   const request = useCallback(async (payload: Record<string, unknown>) => {
     const response = await fetch('/api/teacher-portal', {
@@ -215,11 +241,13 @@ export default function TeacherGradesPanel({
     { key: 'practicalStudy' as const, visible: settings.includePracticalStudy },
     { key: 'theoryExam' as const, visible: settings.includeTheoryExam },
     { key: 'practicalExam' as const, visible: settings.includePracticalExam },
+    { key: 'labCommitment' as const, visible: settings.includeLabCommitment },
   ]).filter((component) => component.visible), [
     settings.includeActivity,
     settings.includeCard,
     settings.includePracticalExam,
     settings.includePracticalStudy,
+    settings.includeLabCommitment,
     settings.includeTheoryExam,
     settings.includeTheoryStudy,
   ]);
@@ -261,6 +289,28 @@ export default function TeacherGradesPanel({
           || first.component.localeCompare(second.component);
       });
   }, [gradeComponentFilter, gradeStudentSearch, students, visibleGrades]);
+  const visibleGradeRows = useMemo(() => {
+    if (!gradeComponentFilter) {
+      return sortedVisibleGrades.map((grade) => ({
+        studentId: grade.student_id,
+        studentName: students.find((student) => student.id === grade.student_id)?.fullName ?? grade.student_id,
+        component: grade.component,
+        grade,
+      }));
+    }
+    const query = gradeStudentSearch.trim().toLocaleLowerCase();
+    const gradesByStudent = new Map(visibleGrades
+      .filter((grade) => grade.component === gradeComponentFilter)
+      .map((grade) => [grade.student_id, grade]));
+    return sortedStudents
+      .filter((student) => !query || `${student.fullName} ${student.id}`.toLocaleLowerCase().includes(query))
+      .map((student) => ({
+        studentId: student.id,
+        studentName: student.fullName,
+        component: gradeComponentFilter,
+        grade: gradesByStudent.get(student.id),
+      }));
+  }, [gradeComponentFilter, gradeStudentSearch, sortedStudents, sortedVisibleGrades, students, visibleGrades]);
   const configured = Object.prototype.hasOwnProperty.call(settingsBySubject, selectedSubject);
 
   const updateSetting = (key: keyof GradeSettings, value: boolean | number) => {
@@ -317,6 +367,13 @@ export default function TeacherGradesPanel({
       setScore('');
       setEditingGrade(null);
       setShowStudentsWithoutGrade(false);
+      logGradeActivity(editingGrade ? 'teacher_grade_updated' : 'teacher_grade_saved', {
+        subject: selectedSubject,
+        studentId: selectedStudent,
+        component: selectedComponent,
+        score: numericScore,
+        maxScore: maximum,
+      });
       setNotice({ message: editingGrade ? 'تم تعديل العلامة بنجاح.' : 'تم حفظ العلامة بنجاح.', type: 'success' });
     } catch (error) {
       setNotice({ message: error instanceof Error ? error.message : 'تعذر حفظ العلامة.', type: 'error' });
@@ -352,6 +409,11 @@ export default function TeacherGradesPanel({
         studentId: grade.student_id,
         gradeComponent: grade.component,
       });
+      logGradeActivity('teacher_grade_deleted', {
+        subject: selectedSubject,
+        studentId: grade.student_id,
+        component: grade.component,
+      });
       setGrades((current) => current.filter((item) => !(item.subject === selectedSubject
         && item.student_id === grade.student_id && item.component === grade.component)));
       if (editingGrade?.studentId === grade.student_id && editingGrade.component === grade.component) cancelEditGrade();
@@ -383,6 +445,12 @@ export default function TeacherGradesPanel({
         ...(scope === 'component' ? { gradeComponent: selectedComponent } : {}),
       });
       const deletedCount = Number(result.deletedCount ?? 0);
+      logGradeActivity('teacher_grades_deleted', {
+        subject: selectedSubject,
+        scope,
+        component: scope === 'component' ? selectedComponent : null,
+        deletedCount,
+      });
       setGrades((current) => current.filter((grade) => scope === 'subject'
         ? grade.subject !== selectedSubject
         : !(grade.subject === selectedSubject && grade.component === selectedComponent)));
@@ -489,9 +557,102 @@ export default function TeacherGradesPanel({
       link.click();
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      logGradeActivity('teacher_grade_template_downloaded', {
+        subject: selectedSubject,
+        studentCount: students.length,
+        components: selectedTemplateComponents,
+      });
     } catch (error) {
       console.error('Teacher grade template export failed:', error);
       setNotice({ message: 'تعذر إنشاء ملف Excel. حاول مرة أخرى.', type: 'error' });
+    }
+  };
+
+  const downloadGradeRegister = async () => {
+    if (!students.length) {
+      setNotice({ message: 'لا يوجد طلاب في المادة لتنزيل الرصد.', type: 'error' });
+      return;
+    }
+    if (!availableComponents.length) {
+      setNotice({ message: 'لا توجد مكوّنات علامات مفعّلة لهذه المادة.', type: 'error' });
+      return;
+    }
+    setExportingGradeRegister(true);
+    try {
+      const ExcelJS = await import('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      const downloadDate = new Date();
+      const worksheet = workbook.addWorksheet('الرصد النهائي', {
+        views: [{ state: 'frozen', ySplit: 3, rightToLeft: true }],
+        pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1 },
+      });
+      const columns = [
+        { header: 'التسلسل', key: 'sequence', width: 12 },
+        { header: 'الرقم الجامعي', key: 'studentId', width: 20 },
+        { header: 'اسم الطالب', key: 'fullName', width: 34 },
+        ...availableComponents.map(({ key }) => ({
+          header: `${componentLabels[key]} (السقف ${getComponentMaximum(settings, key)})`,
+          key,
+          width: 26,
+        })),
+      ];
+      worksheet.columns = columns;
+      worksheet.mergeCells(1, 1, 1, columns.length);
+      worksheet.getCell(1, 1).value = `الرصد النهائي — ${selectedSubject}`;
+      worksheet.mergeCells(2, 1, 2, columns.length);
+      worksheet.getCell(2, 1).value = `تاريخ التنزيل: ${downloadDate.toLocaleDateString('ar-SY')}`;
+      [worksheet.getRow(1), worksheet.getRow(2)].forEach((row) => {
+        row.font = { name: 'Arial', bold: true, color: { argb: 'FF134E4A' }, size: 12 };
+        row.alignment = { horizontal: 'right', vertical: 'middle' };
+      });
+      const headerRow = worksheet.getRow(3);
+      columns.forEach((column, index) => {
+        headerRow.getCell(index + 1).value = column.header;
+      });
+      headerRow.height = 32;
+      headerRow.font = { name: 'Arial', bold: true, color: { argb: 'FFFFFFFF' } };
+      headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } };
+      headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+      const existingGrades = new Map(visibleGrades.map((grade) => [`${grade.student_id}:${grade.component}`, grade.score]));
+      worksheet.addRows(sortedStudents.map((student, index) => ({
+        sequence: index + 1,
+        studentId: student.id,
+        fullName: student.fullName,
+        ...Object.fromEntries(availableComponents.map(({ key }) => [
+          key,
+          existingGrades.get(`${student.id}:${key}`) ?? null,
+        ])),
+      })));
+      worksheet.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3, column: columns.length } };
+      worksheet.eachRow((row, rowNumber) => {
+        if (rowNumber <= 3) return;
+        row.eachCell((cell) => {
+          cell.alignment = { horizontal: 'right', vertical: 'middle' };
+          if (rowNumber % 2 === 0) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF1F7F6' } };
+        });
+      });
+      const buffer = await workbook.xlsx.writeBuffer();
+      const url = URL.createObjectURL(new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }));
+      const link = document.createElement('a');
+      link.href = url;
+      const dateFilePart = `${downloadDate.getFullYear()}-${String(downloadDate.getMonth() + 1).padStart(2, '0')}-${String(downloadDate.getDate()).padStart(2, '0')}`;
+      link.download = `${selectedSubject}-${dateFilePart}-الرصد-النهائي.xlsx`.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-');
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      logGradeActivity('teacher_grade_register_downloaded', {
+        subject: selectedSubject,
+        studentCount: sortedStudents.length,
+        components: availableComponents.map(({ key }) => key),
+      });
+    } catch (error) {
+      console.error('Teacher grade register export failed:', error);
+      setNotice({ message: 'تعذر إنشاء ملف الرصد النهائي. حاول مرة أخرى.', type: 'error' });
+    } finally {
+      setExportingGradeRegister(false);
     }
   };
 
@@ -620,6 +781,12 @@ export default function TeacherGradesPanel({
         return [...updated.values()];
       });
       setGradeImportReport({ imported: savedGrades.length, missing, unmatched, exceeded, invalid });
+      logGradeActivity('teacher_grades_imported', {
+        subject: selectedSubject,
+        fileName: file.name,
+        importedCount: savedGrades.length,
+        components: [...entriesByComponent].filter(([, entries]) => entries.size).map(([component]) => component),
+      });
       setNotice({
         message: savedGrades.length
           ? `تم تحميل ${savedGrades.length} علامة في ${gradeBatches.length} مكوّناً${missing.length ? `، ويوجد خانات فارغة في ${missing.length} مكوّنات` : ''}.`
@@ -627,6 +794,10 @@ export default function TeacherGradesPanel({
         type: 'success',
       });
     } catch (error) {
+      logGradeActivity('teacher_grade_import_failed', {
+        subject: selectedSubject,
+        fileName: file.name,
+      });
       setNotice({ message: error instanceof Error ? error.message : 'تعذر قراءة ملف العلامات.', type: 'error' });
     } finally {
       setImportingGrades(false);
@@ -670,6 +841,7 @@ export default function TeacherGradesPanel({
                 practicalStudy: 'maxPracticalStudy',
                 theoryExam: 'maxTheoryExam',
                 practicalExam: 'maxPracticalExam',
+                labCommitment: 'maxLabCommitment',
               }[key] as GradeCeiling;
               return (
                 <label key={key}>
@@ -694,7 +866,7 @@ export default function TeacherGradesPanel({
 
       <section className="teacher-panel">
         <div className="teacher-panel-heading">
-          <div><h2>تحميل العلامات من Excel</h2><p>اختر المكوّنات التي تريدها في الملف، ثم نزّل قائمة الطلاب واملأ العلامات وأعد رفع الملف. المطابقة تتم بالرقم الجامعي فقط.</p></div>
+          <div><h2>تحميل العلامات من Excel</h2><p>نزّل قالباً لإدخال العلامات أو ملف الرصد النهائي الكامل، ثم ارفع القالب بعد تعبئته. المطابقة تتم بالرقم الجامعي فقط.</p></div>
         </div>
         <div className="teacher-grade-import-tools">
           <fieldset className="teacher-grade-template-components" disabled={importingGrades}>
@@ -718,6 +890,9 @@ export default function TeacherGradesPanel({
           </fieldset>
           <button type="button" className="teacher-grade-save-button" onClick={() => void downloadGradeTemplate()} disabled={!students.length || !selectedTemplateComponents.length || importingGrades}>
             <Download size={17} aria-hidden="true" /> تنزيل قائمة الطلاب
+          </button>
+          <button type="button" className="teacher-grade-save-button" onClick={() => void downloadGradeRegister()} disabled={!configured || !students.length || exportingGradeRegister || importingGrades}>
+            <Download size={17} aria-hidden="true" /> {exportingGradeRegister ? 'جارٍ تجهيز الرصد...' : 'تنزيل الرصد النهائي'}
           </button>
           <label className={`teacher-grade-upload-button${!configured || importingGrades ? ' is-disabled' : ''}`}>
             <FileUp size={17} aria-hidden="true" /> {importingGrades ? 'جارٍ استيراد العلامات...' : 'رفع ملف العلامات'}
@@ -832,7 +1007,7 @@ export default function TeacherGradesPanel({
 
       <section className="teacher-panel">
         <div className="teacher-panel-heading">
-          <div><h2>العلامات المدخلة</h2><p>تظهر العلامات المسجلة للمادة المختارة فقط، مرتبة أبجديًا حسب اسم الطالب.</p></div>
+          <div><h2>العلامات المدخلة</h2><p>{gradeComponentFilter ? `تظهر قائمة كل طلاب المادة لمكوّن ${componentLabels[gradeComponentFilter]}، مرتبة أبجديًا حسب اسم الطالب.` : 'تظهر العلامات المسجلة للمادة المختارة فقط، مرتبة أبجديًا حسب اسم الطالب.'}</p></div>
           <button
             type="button"
             className="teacher-grade-save-button"
@@ -870,25 +1045,35 @@ export default function TeacherGradesPanel({
             <input type="search" value={gradeStudentSearch} onChange={(event) => setGradeStudentSearch(event.target.value)} placeholder="اسم الطالب أو رقمه الجامعي" />
           </label>
         </div>
-        {sortedVisibleGrades.length ? (
+        {visibleGradeRows.length ? (
           <div className="teacher-table-wrap is-active">
             <table className="teacher-table">
               <thead><tr><th>الطالب</th><th>المكوّن</th><th>العلامة</th><th>السقف</th><th>إجراءات</th></tr></thead>
               <tbody>
-                {sortedVisibleGrades.map((grade) => (
-                  <tr key={`${grade.student_id}-${grade.component}`}>
-                    <td>{students.find((student) => student.id === grade.student_id)?.fullName ?? grade.student_id}</td>
-                    <td>{componentLabels[grade.component]}</td>
-                    <td>{grade.score}</td>
-                    <td>{grade.max_score}</td>
+                {visibleGradeRows.map(({ studentId, studentName, component, grade }) => (
+                  <tr key={`${studentId}-${component}`}>
+                    <td>{studentName}</td>
+                    <td>{componentLabels[component]}</td>
+                    <td>{grade?.score ?? '—'}</td>
+                    <td>{grade?.max_score ?? getComponentMaximum(settings, component)}</td>
                     <td>
                       <div className="teacher-grade-row-actions">
-                        <button type="button" className="teacher-grade-edit-button" onClick={() => beginEditGrade(grade)} aria-label={`تعديل ${componentLabels[grade.component]}`}>
-                          <Pencil size={15} aria-hidden="true" /> تعديل
-                        </button>
-                        <button type="button" className="teacher-grade-delete-button" onClick={() => void deleteOneGrade(grade)} disabled={deletingGrade === `${grade.student_id}:${grade.component}`} aria-label={`حذف ${componentLabels[grade.component]}`}>
-                          <Trash2 size={15} aria-hidden="true" /> {deletingGrade === `${grade.student_id}:${grade.component}` ? 'جارٍ الحذف...' : 'حذف'}
-                        </button>
+                        {grade ? <>
+                          <button type="button" className="teacher-grade-edit-button" onClick={() => beginEditGrade(grade)} aria-label={`تعديل ${componentLabels[grade.component]}`}>
+                            <Pencil size={15} aria-hidden="true" /> تعديل
+                          </button>
+                          <button type="button" className="teacher-grade-delete-button" onClick={() => void deleteOneGrade(grade)} disabled={deletingGrade === `${grade.student_id}:${grade.component}`} aria-label={`حذف ${componentLabels[grade.component]}`}>
+                            <Trash2 size={15} aria-hidden="true" /> {deletingGrade === `${grade.student_id}:${grade.component}` ? 'جارٍ الحذف...' : 'حذف'}
+                          </button>
+                        </> : <button type="button" className="teacher-grade-edit-button" onClick={() => {
+                          setSelectedStudent(studentId);
+                          setSelectedComponent(component);
+                          setScore('');
+                          setEditingGrade(null);
+                          document.getElementById('teacher-grade-entry')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }}>
+                          <Award size={15} aria-hidden="true" /> إدخال علامة
+                        </button>}
                       </div>
                     </td>
                   </tr>
@@ -896,7 +1081,7 @@ export default function TeacherGradesPanel({
               </tbody>
             </table>
           </div>
-        ) : <p className="teacher-grade-hint">{visibleGrades.length ? 'لا توجد علامات تطابق عوامل التصفية.' : 'لا توجد علامات مدخلة لهذه المادة بعد.'}</p>}
+        ) : <p className="teacher-grade-hint">{gradeStudentSearch || (gradeComponentFilter && !students.length) ? 'لا توجد نتائج تطابق عوامل التصفية.' : 'لا توجد علامات مدخلة لهذه المادة بعد.'}</p>}
       </section>
     </div>
   );

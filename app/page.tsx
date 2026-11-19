@@ -48,15 +48,6 @@ type ScheduleItem = {
   group_name: string | null;
 };
 
-type GradeEntry = {
-  subject: string;
-  annual: number | null;
-  theory: number | null;
-  practical: number | null;
-  total: number | null;
-  assistance: string;
-};
-
 type TeacherGrade = {
   id: string;
   subject: string;
@@ -70,33 +61,6 @@ type TeacherGrade = {
 const studentSessionStorageKey = 'udti-student-session';
 const rememberedStudentIdStorageKey = 'udti-remembered-student-id';
 const rememberedStudentPasswordStorageKey = 'udti-remembered-student-password';
-
-const metadataKeys = new Set([
-  'id',
-  'الرقم الجامعي',
-  'كلمة السر',
-  'اسم الطالب',
-  'اسم الاب',
-  'الكنية',
-  'القسم',
-  'رقم الهاتف',
-  'نوع التسجيل',
-  'ملاحظة',
-  'البريد الإلكتروني',
-  'الفئة',
-  'تاريخ_تغيير_الفئة',
-  'تاريخ الإنشاء',
-  'السنه الدراسية',
-  'created_at',
-  'updated_at',
-  'createdAt',
-  'updatedAt',
-  'created_by_supervisor',
-  'supervisor_created_at',
-  'force_password_change',
-  'telegram_verification_code',
-  'avatar_url',
-]);
 
 const formatStudentValue = (value: string | number | null | undefined) => {
   if (value === null || value === undefined || value === '') return 'غير متوفر';
@@ -121,89 +85,11 @@ const formatDate = (value: string | null | undefined) => {
   }
 };
 
-const toNumber = (value: unknown): number | null => {
-  if (typeof value === 'number' && !Number.isNaN(value)) return value;
-  if (typeof value === 'string') {
-    const cleaned = value.trim().replace(/,/g, '').replace(/[^0-9.-]/g, '');
-    if (!cleaned || cleaned === '-' || cleaned === '.') return null;
-    const parsed = Number(cleaned);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-};
-
 const getValueByKeys = (row: Record<string, unknown>, keys: string[]) => {
   for (const key of keys) {
     if (row[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
   }
   return undefined;
-};
-
-const extractGrades = (rows: Record<string, unknown>[]): GradeEntry[] => {
-  if (!rows.length) return [];
-
-  const first = rows[0];
-  const gradeRows: GradeEntry[] = [];
-
-  Object.entries(first).forEach(([key, value]) => {
-    if (metadataKeys.has(key)) return;
-    if (value === null || value === undefined || value === '') return;
-
-    const parsed = toNumber(value);
-    if (parsed === null) return;
-
-    gradeRows.push({
-      subject: key,
-      annual: parsed,
-      theory: null,
-      practical: null,
-      total: parsed,
-      assistance: parsed >= 50 ? 'مقبول' : 'غير مقبول',
-    });
-  });
-
-  if (gradeRows.length) return gradeRows;
-
-  return rows.flatMap((row) => {
-    return Object.entries(row)
-      .filter(([key, value]) => !metadataKeys.has(key) && value !== null && value !== undefined && value !== '')
-      .map(([subject, value]) => {
-        const numeric = toNumber(value);
-        return {
-          subject,
-          annual: numeric,
-          theory: null,
-          practical: null,
-          total: numeric,
-          assistance: numeric !== null && numeric >= 50 ? 'مقبول' : 'غير مقبول',
-        };
-      });
-  });
-};
-
-const getTableRows = async (
-  tableNames: string[],
-  options: { select?: string; studentId?: string } = {}
-) => {
-  const select = options.select ?? '*';
-  const studentId = options.studentId?.trim();
-  for (const tableName of tableNames) {
-    // نطلب صفوف الطالب فقط من الخادم بدل تنزيل الجدول كاملًا (كان يُقرأ سطر واحد فقط بسبب limit(1)).
-    const base = supabase.from(tableName).select(select);
-    let { data, error } = await (studentId ? base.eq('الرقم الجامعي', studentId) : base.limit(1));
-    if (error && studentId && /column/i.test(String(error.message || ''))) {
-      // الجدول لا يحتوي العمود المتوقع: نرجع لقراءة محدودة ويتولى المستدعي التصفية.
-      ({ data, error } = await supabase.from(tableName).select(select).limit(500));
-    }
-    if (!error) return { data: data ?? [], tableName };
-    const message = String(error.message || '');
-    if (message.includes('does not exist') || message.includes('not found') || message.includes('relation')) {
-      continue;
-    }
-    return { data: data ?? [], tableName, error };
-  }
-
-  return { data: [], tableName: tableNames[0], error: null };
 };
 
 const scheduleDays = ['الأحد', 'الأثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'];
@@ -278,7 +164,6 @@ export default function Home() {
   const [firstLoginCodeSent, setFirstLoginCodeSent] = useState(false);
   const [firstLoginDestination, setFirstLoginDestination] = useState('');
   const [firstLoginCodeSending, setFirstLoginCodeSending] = useState(false);
-  const [grades, setGrades] = useState<GradeEntry[]>([]);
   const [teacherGrades, setTeacherGrades] = useState<TeacherGrade[]>([]);
   const [teacherGradesLoading, setTeacherGradesLoading] = useState(false);
   const [teacherGradeLoadError, setTeacherGradeLoadError] = useState('');
@@ -1056,7 +941,7 @@ export default function Home() {
         }))
         : Promise.resolve({ data: [], error: null });
       const gradeQuery = fetchTeacherGrades();
-      const [studentResult, warningsResult, teacherAlertsResult, gradesResult, teacherGradesResult, scheduleResult, skillsResult] = await Promise.all([
+      const [studentResult, warningsResult, teacherAlertsResult, teacherGradesResult, scheduleResult, skillsResult] = await Promise.all([
         getStudentById(studentId),
         getWarningsForStudent(studentId).then((rows) => ({ data: rows })),
         getTeacherAlertsForStudent(
@@ -1064,13 +949,6 @@ export default function Home() {
           String(getRecordValue(loggedStudent as Record<string, unknown>, ['كلمة السر', 'password', 'pass']) ?? '')
         ).then((rows) => ({ data: rows, error: null as Error | null }))
           .catch((error: unknown) => ({ data: [] as Record<string, unknown>[], error: error instanceof Error ? error : new Error(String(error)) })),
-        getTableRows(['الاعمال', 'الأعمال', 'أعمال', 'العملي', 'النظري'], { studentId }).then(({ data }) => ({
-          data: Array.isArray(data) ? data.filter((row) => {
-            const rowRecord = row as unknown as Record<string, unknown>;
-            const rowStudentId = getValueByKeys(rowRecord, ['الرقم الجامعي', 'student_id', 'studentId']);
-            return String(rowStudentId ?? '') === String(studentId);
-          }) : [],
-        })),
         gradeQuery,
         scheduleQuery,
         supabase.from('student_skills').select('skills').eq('student_id', studentId).maybeSingle(),
@@ -1081,8 +959,6 @@ export default function Home() {
         setLoggedStudent(freshStudent);
       }
 
-      const gradeRows = gradesResult.data.flatMap((row) => extractGrades([row as unknown as Record<string, unknown>]));
-      setGrades(gradeRows);
       setTeacherGrades(teacherGradesResult.data);
       setTeacherGradeLoadError(teacherGradesResult.error?.message ?? '');
       setWarnings([...(warningsResult.data as unknown as Record<string, unknown>[]), ...teacherAlertsResult.data]
@@ -2161,7 +2037,7 @@ export default function Home() {
                 type="text"
                 value={loginData.studentId}
                 onChange={(event) => setLoginData({ ...loginData, studentId: event.target.value })}
-                placeholder="الرقم الجامعي (مع الصفر الأول أو بدونه)"
+                placeholder="الرقم الجامعي"
                 inputMode="numeric"
                 required
                 disabled={isLoading}
@@ -2175,7 +2051,7 @@ export default function Home() {
                 onChange={(event) => setLoginData({ ...loginData, password: event.target.value })}
                 onKeyDown={(event) => setCapsLockOn(event.getModifierState ? event.getModifierState('CapsLock') : false)}
                 onKeyUp={(event) => setCapsLockOn(event.getModifierState ? event.getModifierState('CapsLock') : false)}
-                placeholder="كلمة السر (اتركها فارغة عند أول دخول)"
+                placeholder="كلمة السر"
                 disabled={isLoading}
               />
               <button
@@ -3148,39 +3024,11 @@ export default function Home() {
                     </tbody>
                   </table>
                     )}
-                    {grades.length === 0 && teacherGrades.length === 0 && !teacherGradeLoadError ? (
+                    {teacherGrades.length === 0 && !teacherGradeLoadError ? (
                   <div className="no-data">
                     <i className="fa-solid fa-table-list" />
                     <div>لا توجد بيانات للعلامات حتى الآن.</div>
                   </div>
-                    ) : grades.length > 0 && !teacherGradeLoadError ? (
-                  <>
-                    {teacherGrades.length > 0 && <h3>العلامات السابقة</h3>}
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>المادة</th>
-                        <th>أعمال السنة</th>
-                        <th>نظري</th>
-                        <th>عملي</th>
-                        <th>المجموع</th>
-                        <th>مساعدة امتحانية</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {grades.map((item) => (
-                        <tr key={item.subject}>
-                          <td>{item.subject}</td>
-                          <td>{item.annual ?? '—'}</td>
-                          <td>{item.theory ?? '—'}</td>
-                          <td>{item.practical ?? '—'}</td>
-                          <td>{item.total ?? '—'}</td>
-                          <td>{item.assistance}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  </>
                     ) : null}
                   </>
                 )}

@@ -25,6 +25,16 @@ type NotificationResult = {
   status?: string;
   sent?: number;
   failed?: number;
+  channels?: {
+    telegram?: NotificationChannelResult;
+    email?: NotificationChannelResult;
+  };
+};
+
+type NotificationChannelResult = {
+  sent: number;
+  failed: number;
+  status: string;
 };
 
 const noSubjects: string[] = [];
@@ -81,6 +91,23 @@ const getErrorMessage = (error: string | undefined) => {
 };
 
 const getNotificationMessage = (notification?: NotificationResult) => {
+  if (notification?.channels) {
+    const channelMessages = ([
+      ['telegram', 'تيليجرام'],
+      ['email', 'البريد الإلكتروني'],
+    ] as const).flatMap(([channel, label]) => {
+      const result = notification.channels?.[channel];
+      if (!result) return [];
+      if (result.status === 'missing_bot_token') return [`${label}: إعداد البوت غير مكتمل.`];
+      if (result.status === 'missing_smtp') return [`${label}: إعداد البريد غير مكتمل على الخادم.`];
+      if (result.status === 'no_subscribers') return [`${label}: لا يوجد مستلمون مؤهلون لهذه القناة.`];
+      if (result.status === 'failed' || result.failed > 0) {
+        return [`${label}: أُرسل ${result.sent} وتعذّر إرسال ${result.failed}.`];
+      }
+      return [`${label}: أُرسل إلى ${result.sent} طالب.`];
+    });
+    return `تم نشر الإعلان. ${channelMessages.join(' ')}`;
+  }
   if (!notification || notification.status === 'missing_bot_token') {
     return 'تم نشر الإعلان، لكن إشعار تيليجرام غير مهيأ على الخادم.';
   }
@@ -97,6 +124,7 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [selectedYear, setSelectedYear] = useState('أولى');
   const [targetScope, setTargetScope] = useState<'year' | 'all'>('year');
+  const [notificationChannel, setNotificationChannel] = useState<'telegram' | 'email' | 'both'>('telegram');
   const [selectedSubject, setSelectedSubject] = useState('');
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
@@ -344,6 +372,9 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
         formData.set('supervisorPassword', supervisorPassword);
         formData.set('targetScope', targetScope);
         formData.set('studentYear', targetScope === 'year' ? selectedYear : '');
+        if (targetScope === 'year' && selectedYear === 'أولى') {
+          formData.set('notificationChannel', notificationChannel);
+        }
       }
 
       const response = await fetch(mode === 'teacher' ? '/api/teacher-portal' : '/api/announcements', {
@@ -442,6 +473,7 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
   }
 
   const isSupervisor = mode === 'supervisor';
+  const isFirstYearTarget = isSupervisor && targetScope === 'year' && selectedYear === 'أولى';
   const currentTeacherSubject = mode === 'teacher'
     ? availableSubjects.find((subject) => subject.label === selectedSubject)
     : undefined;
@@ -470,6 +502,24 @@ export default function AnnouncementPanel(props: AnnouncementPanelProps) {
               <option value="أولى">طلاب السنة الأولى</option>
               <option value="ثانية">طلاب السنة الثانية</option>
               <option value="all">كل السنوات</option>
+            </select>
+          </label>
+        )}
+        {isFirstYearTarget && (
+          <label>
+            <span>طريقة إرسال الإشعار لطلاب السنة الأولى</span>
+            <select
+              value={notificationChannel}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === 'telegram' || value === 'email' || value === 'both') {
+                  setNotificationChannel(value);
+                }
+              }}
+            >
+              <option value="telegram">تيليجرام</option>
+              <option value="email">البريد الإلكتروني</option>
+              <option value="both">تيليجرام والبريد الإلكتروني</option>
             </select>
           </label>
         )}

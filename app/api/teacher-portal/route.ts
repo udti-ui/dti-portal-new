@@ -126,6 +126,7 @@ const gradeComponents = {
   practicalStudy: { label: 'مذاكرة عملية', ceiling: 'max_practical_study', included: 'include_practical_study' },
   theoryExam: { label: 'امتحان نظري', ceiling: 'max_theory_exam', included: 'include_theory_exam' },
   practicalExam: { label: 'امتحان عملي', ceiling: 'max_practical_exam', included: 'include_practical_exam' },
+  labCommitment: { label: 'الحضور والالتزام المخبري', ceiling: 'max_lab_commitment', included: 'include_lab_commitment' },
 } as const;
 type GradeComponent = keyof typeof gradeComponents;
 type GradeSettings = {
@@ -135,12 +136,23 @@ type GradeSettings = {
   include_practical_study: boolean;
   include_theory_exam: boolean;
   include_practical_exam: boolean;
+  include_lab_commitment: boolean;
   max_card: number;
   max_activity: number;
   max_theory_study: number;
   max_practical_study: number;
   max_theory_exam: number;
   max_practical_exam: number;
+  max_lab_commitment: number;
+};
+type TeacherGradeRow = {
+  id: number;
+  subject_id: string;
+  student_id: string;
+  component: string;
+  score: number;
+  max_score: number;
+  updated_at: string;
 };
 
 const parseGradeSettings = (value: unknown): GradeSettings | null => {
@@ -151,7 +163,8 @@ const parseGradeSettings = (value: unknown): GradeSettings | null => {
     || typeof record.includeTheoryStudy !== 'boolean'
     || typeof record.includePracticalStudy !== 'boolean'
     || typeof record.includeTheoryExam !== 'boolean'
-    || typeof record.includePracticalExam !== 'boolean') return null;
+    || typeof record.includePracticalExam !== 'boolean'
+    || typeof record.includeLabCommitment !== 'boolean') return null;
   const included = {
     include_card: record.includeCard,
     include_activity: record.includeActivity,
@@ -159,6 +172,7 @@ const parseGradeSettings = (value: unknown): GradeSettings | null => {
     include_practical_study: record.includePracticalStudy,
     include_theory_exam: record.includeTheoryExam,
     include_practical_exam: record.includePracticalExam,
+    include_lab_commitment: record.includeLabCommitment,
   };
   const ceilings = {
     max_card: Number(record.maxCard),
@@ -167,6 +181,7 @@ const parseGradeSettings = (value: unknown): GradeSettings | null => {
     max_practical_study: Number(record.maxPracticalStudy),
     max_theory_exam: Number(record.maxTheoryExam),
     max_practical_exam: Number(record.maxPracticalExam),
+    max_lab_commitment: Number(record.maxLabCommitment),
   };
   if (Object.values(ceilings).some((ceiling) => !Number.isFinite(ceiling) || ceiling < 0 || ceiling > 1000)
     || Object.entries(included).some(([key, enabled]) => enabled && ceilings[key.replace('include_', 'max_') as keyof typeof ceilings] <= 0)) {
@@ -320,15 +335,25 @@ export async function POST(request: Request) {
     if (body.action === 'list-grades') {
       const subjectIds = assignments.map((assignment) => assignment.id);
       if (!subjectIds.length) return NextResponse.json({ success: true, settings: [], grades: [] });
-      const [settingsResult, gradesResult] = await Promise.all([
-        supabase.from('teacher_subject_grade_settings').select('*').in('subject_id', subjectIds),
-        supabase.from('teacher_subject_grades')
+      const settingsResult = await supabase.from('teacher_subject_grade_settings').select('*').in('subject_id', subjectIds);
+      const gradeRows: TeacherGradeRow[] = [];
+      let gradesError: { code?: string; message: string } | null = null;
+      for (let offset = 0; offset < 100000; offset += 500) {
+        const { data, error } = await supabase.from('teacher_subject_grades')
           .select('id, subject_id, student_id, component, score, max_score, updated_at')
           .in('subject_id', subjectIds)
-          .order('updated_at', { ascending: false }),
-      ]);
-      if (settingsResult.error || gradesResult.error) {
-        const error = settingsResult.error ?? gradesResult.error;
+          .order('updated_at', { ascending: false })
+          .order('id', { ascending: true })
+          .range(offset, offset + 499);
+        if (error) {
+          gradesError = error;
+          break;
+        }
+        gradeRows.push(...(data ?? []) as TeacherGradeRow[]);
+        if ((data ?? []).length < 500) break;
+      }
+      if (settingsResult.error || gradesError) {
+        const error = settingsResult.error ?? gradesError;
         console.error('TEACHER_GRADES_LOAD_FAILED:', error?.message);
         if (error?.code === 'PGRST205' || /does not exist|relation|could not find the .*column/i.test(error?.message ?? '')) {
           return errorResponse('teacher-grades-schema-not-configured', 503);
@@ -348,7 +373,7 @@ export async function POST(request: Request) {
           ...settings,
           subject: subjectLabels.get(String(settings.subject_id)) ?? '',
         })),
-        grades: (gradesResult.data ?? []).map((grade) => ({
+        grades: gradeRows.map((grade) => ({
           ...grade,
           subject: subjectLabels.get(String(grade.subject_id)) ?? '',
         })).filter((grade) => grade.subject
@@ -361,7 +386,7 @@ export async function POST(request: Request) {
       if (!assignment) return errorResponse('invalid-grade-notification-subject', 400);
 
       const { data: settings, error: settingsError } = await supabase.from('teacher_subject_grade_settings')
-        .select('include_card, include_activity, include_theory_study, include_practical_study, include_theory_exam, include_practical_exam')
+        .select('include_card, include_activity, include_theory_study, include_practical_study, include_theory_exam, include_practical_exam, include_lab_commitment')
         .eq('subject_id', assignment.id)
         .maybeSingle();
       if (settingsError) {

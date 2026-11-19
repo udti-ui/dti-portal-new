@@ -176,12 +176,15 @@ export async function POST(request: Request) {
     if (action === 'create-supervisor') {
       const year = normalizeStudentYear(body.studentYear);
       const targetScope = clean(body.targetScope);
+      const notificationChannel = clean(body.notificationChannel) || 'telegram';
       const title = clean(body.title);
       const content = clean(body.content);
       const allYears = targetScope === 'all';
       const attachment = body.attachment instanceof File ? body.attachment : null;
       if (!['year', 'all'].includes(targetScope)
         || (!allYears && !year)
+        || !['telegram', 'email', 'both'].includes(notificationChannel)
+        || (notificationChannel !== 'telegram' && (allYears || year !== 'أولى'))
         || !validAnnouncementText(title, content)
         || (!content && !attachment)) {
         return errorResponse('invalid-announcement', 400);
@@ -206,7 +209,10 @@ export async function POST(request: Request) {
         if (upload.attachment) await removeAnnouncementAttachment(supabase, upload.attachment.attachment_path);
         return databaseFailure(error);
       }
-      const notification = await notifyStudentsAboutAnnouncement(supabase, announcement);
+      const notificationChannels: ('telegram' | 'email')[] = notificationChannel === 'both'
+        ? ['telegram', 'email']
+        : notificationChannel === 'email' ? ['email'] : ['telegram'];
+      const notification = await notifyStudentsAboutAnnouncement(supabase, announcement, notificationChannels);
       return NextResponse.json({ success: true, announcement, notification });
     }
 

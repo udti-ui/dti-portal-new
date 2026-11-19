@@ -159,7 +159,8 @@ export async function POST(request: Request) {
 
       let query = supabase.from('students')
         .select(
-          '"الرقم الجامعي", "كلمة السر", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "ملاحظة", telegram_chat_id, telegram_notifications_enabled, avatar_url'
+          '"الرقم الجامعي", "كلمة السر", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل", "ملاحظة", telegram_chat_id, telegram_notifications_enabled, avatar_url',
+          { count: 'exact' }
         )
         .order('الرقم الجامعي', { ascending: true })
         .range(start, start + pageSize);
@@ -187,7 +188,7 @@ export async function POST(request: Request) {
       if (filters.length === 1) query = query.or(filters[0].replace(/^or\(|\)$/g, ''));
       if (filters.length > 1) query = query.or(`and(${filters.join(',')})`);
 
-      const { data, error } = await query;
+      const { data, error, count } = await query;
       if (error) {
         console.error('[student-operations] paginated student list failed:', {
           message: error.message,
@@ -202,16 +203,54 @@ export async function POST(request: Request) {
           `تعذر قراءة جدول الطلاب في Supabase. تأكد من وجود جدول students وأعمدته المطلوبة. التفاصيل: ${detail}`
         );
       }
+      if (count === null) return responseError('student-count-failed', 500);
       const rows = data ?? [];
       return NextResponse.json({
         success: true,
         students: rows.slice(0, pageSize),
         hasMore: rows.length > pageSize,
+        totalCount: count,
         page,
         pageSize,
       }, {
         headers: { 'Cache-Control': 'private, no-store' },
       });
+    }
+
+    if (action === 'delete-student') {
+      const verification = await verifyFirstDegreeSupervisor(supabase, username, password);
+      if (verification.failed) return responseError('supervisor-lookup-failed', 503);
+      if (!verification.valid) return responseError('first-degree-supervisor-required', 403);
+
+      const studentId = clean(body.studentId, 40);
+      if (!studentId) return responseError('invalid-student-id', 400);
+
+      const { data: student, error: studentError } = await supabase.from('students')
+        .select('"الرقم الجامعي", "اسم الطالب", "اسم الاب", "الكنية", "القسم", "الفئة", "السنه الدراسية", "رقم الهاتف", "البريد الإلكتروني", "نوع التسجيل"')
+        .eq('الرقم الجامعي', studentId)
+        .maybeSingle();
+      if (studentError) {
+        console.error('[student-operations] student lookup before deletion failed:', studentError.message);
+        return responseError('student-detail-failed', 500);
+      }
+      if (!student) return responseError('student-not-found', 404);
+
+      const { data: deletedStudent, error: deleteError } = await supabase.from('students')
+        .delete()
+        .eq('الرقم الجامعي', studentId)
+        .select('"الرقم الجامعي"')
+        .maybeSingle();
+      if (deleteError) {
+        console.error('[student-operations] student deletion failed:', deleteError.message);
+        return responseError('student-delete-failed', 500);
+      }
+      if (!deletedStudent) return responseError('student-not-found', 404);
+
+      await audit(request, username, 'student_account_deleted_by_supervisor', {
+        ...studentAuditSnapshot(student as Record<string, unknown>),
+        deletedAt: new Date().toISOString(),
+      }, 'supervisor');
+      return NextResponse.json({ success: true });
     }
 
     if (action === 'list-tickets' || action === 'review-ticket') {
@@ -273,9 +312,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, result: data });
     }
 
-    const verification = await verifyDegreeFourSupervisor(supabase, username, password);
-    if (verification.failed) return responseError('supervisor-lookup-failed', 503);
-    if (!verification.valid) return responseError('degree-four-supervisor-required', 403);
+    let firstDegreeGradeViewer = false;
+    if (action === 'student-grades') {
+      const firstDegreeVerification = await verifyFirstDegreeSupervisor(supabase, username, password);
+      if (firstDegreeVerification.failed) return responseError('supervisor-lookup-failed', 503);
+      firstDegreeGradeViewer = firstDegreeVerification.valid;
+      if (!firstDegreeGradeViewer) {
+        const degreeFourVerification = await verifyDegreeFourSupervisor(supabase, username, password);
+        if (degreeFourVerification.failed) return responseError('supervisor-lookup-failed', 503);
+        if (!degreeFourVerification.valid) return responseError('degree-four-supervisor-required', 403);
+      }
+    } else {
+      const verification = await verifyDegreeFourSupervisor(supabase, username, password);
+      if (verification.failed) return responseError('supervisor-lookup-failed', 503);
+      if (!verification.valid) return responseError('degree-four-supervisor-required', 403);
+    }
 
     if (action === 'initial') {
       const { data, error } = await supabase.rpc('suggest_student_university_id');
@@ -443,6 +494,7 @@ export async function POST(request: Request) {
         practicalStudy: 'مذاكرة عملية',
         theoryExam: 'امتحان نظري',
         practicalExam: 'امتحان عملي',
+        labCommitment: 'الحضور والالتزام المخبري',
       };
       const results = grades.map((grade) => ({
         subject: subjectsById.get(String(grade.subject_id)) ?? 'مادة غير معروفة',
@@ -452,10 +504,10 @@ export async function POST(request: Request) {
         maxScore: grade.max_score,
         updatedAt: grade.updated_at,
       }));
-      await audit(request, username, 'degree4_student_grades_viewed', {
+      await audit(request, username, firstDegreeGradeViewer ? 'student_grades_viewed_by_supervisor' : 'degree4_student_grades_viewed', {
         studentId,
         gradeCount: results.length,
-      });
+      }, firstDegreeGradeViewer ? 'supervisor' : 'support_supervisor');
       return NextResponse.json({ success: true, grades: results }, {
         headers: { 'Cache-Control': 'private, no-store' },
       });

@@ -17,6 +17,7 @@ const componentLabels: Record<string, string> = {
   practicalStudy: 'مذاكرة عملية',
   theoryExam: 'امتحان نظري',
   practicalExam: 'امتحان عملي',
+  labCommitment: 'الحضور والالتزام المخبري',
 };
 
 export async function POST(request: Request) {
@@ -56,7 +57,7 @@ export async function POST(request: Request) {
     const subjectIds = [...subjectById.keys()];
     const [settingsResult, gradesResult] = await Promise.all([
       supabase.from('teacher_subject_grade_settings')
-        .select('subject_id, include_card, include_activity, include_theory_study, include_practical_study, include_theory_exam, include_practical_exam')
+        .select('*')
         .in('subject_id', subjectIds),
       supabase.from('teacher_subject_grades')
         .select('id, subject_id, component, score, max_score, updated_at')
@@ -82,6 +83,7 @@ export async function POST(request: Request) {
         practicalStudy: settings.include_practical_study,
         theoryExam: settings.include_theory_exam,
         practicalExam: settings.include_practical_exam,
+        labCommitment: settings.include_lab_commitment,
       }).filter(([, enabled]) => enabled === true).map(([component]) => component)),
     ]));
     const grades = (gradesResult.data ?? []).flatMap((grade) => {

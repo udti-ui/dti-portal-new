@@ -45,6 +45,15 @@ type StudentRow = {
   ['الرقم']?: string | number;
 };
 
+type SupervisorStudentGrade = {
+  subject: string;
+  teacher: string;
+  component: string;
+  score: number | string;
+  maxScore: number | string;
+  updatedAt?: string;
+};
+
 type AttendanceStatus = 'pending' | 'present' | 'absent';
 type AbsenceReason = 'غياب مبرر' | 'غياب غير مبرر';
 type SupervisorFeature = 'attendance' | 'admin' | 'supervisors' | 'logs' | 'students' | 'create_student' | 'profile' | 'teacher_accounts' | 'teacher_management' | 'class_schedule' | 'feedback' | 'chat' | 'chat_support' | 'announcements' | 'course_lectures' | 'degree4_students' | 'support_tickets';
@@ -208,10 +217,12 @@ const auditActionLabels: Record<string, string> = {
   degree4_available_classes_viewed: 'عرض الفئات المتاحة - قسم الدعم',
   degree4_created_accounts_viewed: 'عرض حسابات أنشأها قسم الدعم',
   degree4_created_student_opened: 'عرض بيانات حساب أنشأه قسم الدعم',
+  student_grades_viewed_by_supervisor: 'عرض نتائج طالب',
   degree4_support_tickets_viewed: 'عرض تذاكر قسم الدعم',
   supervisor_login_failed: 'محاولة تسجيل دخول مشرف غير ناجحة',
   supervisor_button_clicked: 'ضغط زر في لوحة المشرف',
   degree4_created_student_deleted: 'حذف حساب طالب - قسم الدعم',
+  student_account_deleted_by_supervisor: 'حذف حساب طالب',
   degree4_student_update_requested: 'طلب تعديل بيانات طالب',
   degree4_support_ticket_created: 'رفع تذكرة للإدارة العليا',
   degree4_support_ticket_reviewed: 'مراجعة تذكرة قسم الدعم',
@@ -225,6 +236,14 @@ const auditActionLabels: Record<string, string> = {
   student_first_login_password_changed: 'تغيير كلمة المرور عند أول دخول',
   teacher_login: 'تسجيل دخول المدرس',
   teacher_logout: 'تسجيل خروج المدرس',
+  teacher_grade_saved: 'إدخال علامة لطالب',
+  teacher_grade_updated: 'تعديل علامة طالب',
+  teacher_grades_imported: 'استيراد علامات من Excel',
+  teacher_grade_import_failed: 'فشل استيراد ملف العلامات',
+  teacher_grade_deleted: 'حذف علامة طالب',
+  teacher_grades_deleted: 'حذف مجموعة علامات',
+  teacher_grade_register_downloaded: 'تنزيل الرصد النهائي',
+  teacher_grade_template_downloaded: 'تنزيل قالب العلامات',
   teacher_alert_created: 'إضافة تنبيه لطالب',
   teacher_alert_deleted: 'حذف تنبيه طالب',
   teacher_account_created: 'إنشاء حساب مدرس',
@@ -425,7 +444,7 @@ const loadAdminRecords = async () => {
   };
 };
 
-const loadAuditLogs = async (username: string, password: string, studentId = '') => {
+const loadAuditLogs = async (username: string, password: string, studentId = '', offset = 0) => {
   const response = await fetch('/api/audit-log', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -434,9 +453,10 @@ const loadAuditLogs = async (username: string, password: string, studentId = '')
       username,
       password,
       studentId,
+      offset,
     }),
   });
-  const result = await response.json() as { success?: boolean; error?: string; logs?: AdminRecord[] };
+  const result = await response.json() as { success?: boolean; error?: string; logs?: AdminRecord[]; nextOffset?: number | null };
   if (!response.ok || !result.success) {
     const errorMessages: Record<string, string> = {
       'audit-service-not-configured': 'خدمة السجلات غير مهيأة؛ تحقق من SUPABASE_SERVICE_ROLE_KEY.',
@@ -447,7 +467,7 @@ const loadAuditLogs = async (username: string, password: string, studentId = '')
     };
     throw new Error(errorMessages[result.error ?? ''] ?? 'تعذر تحميل سجلات النظام.');
   }
-  return result.logs ?? [];
+  return { logs: result.logs ?? [], nextOffset: result.nextOffset ?? null };
 };
 
 const insertAdminAttendance = async (warning: AdminRecord, supervisor: string) => {
@@ -1284,6 +1304,9 @@ export default function AttendancePage() {
   const [adminSupervisorWarnings, setAdminSupervisorWarnings] = useState<AdminRecord[]>([]);
   const [supervisorRecords, setSupervisorRecords] = useState<AdminRecord[]>([]);
   const [auditLogs, setAuditLogs] = useState<AdminRecord[]>([]);
+  const [auditLogNextOffset, setAuditLogNextOffset] = useState<number | null>(null);
+  const [auditLogLoadedStudentId, setAuditLogLoadedStudentId] = useState('');
+  const [auditLogsLoadingMore, setAuditLogsLoadingMore] = useState(false);
   const [auditLogSearch, setAuditLogSearch] = useState('');
   const [auditLogStudentId, setAuditLogStudentId] = useState('');
   const [auditLogUserType, setAuditLogUserType] = useState('all');
@@ -1338,6 +1361,7 @@ export default function AttendancePage() {
   const [selectedAdminAttendanceKey, setSelectedAdminAttendanceKey] = useState('');
   const [selectedAdminWarningKey, setSelectedAdminWarningKey] = useState('');
   const [studentDirectory, setStudentDirectory] = useState<StudentRow[]>([]);
+  const [studentDirectoryTotalCount, setStudentDirectoryTotalCount] = useState(0);
   const [studentDirectoryPage, setStudentDirectoryPage] = useState(0);
   const [studentDirectoryHasMore, setStudentDirectoryHasMore] = useState(false);
   const [studentDirectoryLoading, setStudentDirectoryLoading] = useState(false);
@@ -1347,6 +1371,12 @@ export default function AttendancePage() {
   const [studentSectionFilter, setStudentSectionFilter] = useState('');
   const [editingStudentId, setEditingStudentId] = useState('');
   const [editingStudentDraft, setEditingStudentDraft] = useState<Record<string, string>>({});
+  const [deletingStudentId, setDeletingStudentId] = useState('');
+  const [selectedStudentFile, setSelectedStudentFile] = useState<StudentRow | null>(null);
+  const [studentFileGrades, setStudentFileGrades] = useState<SupervisorStudentGrade[] | null>(null);
+  const [studentFileGradesLoading, setStudentFileGradesLoading] = useState(false);
+  const [studentFileGradesError, setStudentFileGradesError] = useState('');
+  const [studentPhotoPreview, setStudentPhotoPreview] = useState<{ url: string; name: string } | null>(null);
   const [showCreateStudentForm, setShowCreateStudentForm] = useState(false);
   const [newStudentForm, setNewStudentForm] = useState<Record<string, string>>({
     'الرقم الجامعي': '',
@@ -1636,7 +1666,9 @@ export default function AttendancePage() {
   };
 
   const refreshAuditLogs = async (studentId = '') => {
-    const password = supervisorPassword || window.prompt('أدخل كلمة مرور المشرف للتحقق من صلاحية عرض السجلات:') || '';
+    const password = supervisorPassword
+      || window.localStorage.getItem(rememberedSupervisorPasswordKey)
+      || window.prompt('أدخل كلمة مرور المشرف للتحقق من صلاحية عرض السجلات:') || '';
     if (!password) {
       setNotice('أدخل كلمة مرور المشرف لعرض السجلات.');
       return;
@@ -1646,9 +1678,15 @@ export default function AttendancePage() {
       setAuditLogUserType('all');
       setAuditLogActionType('all');
     }
+    setSupervisorPassword(password);
+    setAuditLogs([]);
+    setAuditLogNextOffset(null);
+    setAuditLogLoadedStudentId(studentId.trim());
     setAdminLoading(true);
     try {
-      setAuditLogs(await loadAuditLogs(supervisorUsername, password, studentId));
+      const result = await loadAuditLogs(supervisorUsername, password, studentId.trim());
+      setAuditLogs(result.logs);
+      setAuditLogNextOffset(result.nextOffset);
     } catch (error) {
       setNotice(`تعذر تحميل سجلات النظام: ${getSupabaseErrorText(error)}`);
     } finally {
@@ -1656,6 +1694,30 @@ export default function AttendancePage() {
     }
   };
 
+  const loadMoreAuditLogs = async () => {
+    if (auditLogNextOffset === null || auditLogsLoadingMore) return;
+    const password = supervisorPassword
+      || window.localStorage.getItem(rememberedSupervisorPasswordKey)
+      || window.prompt('أدخل كلمة مرور المشرف للتحقق من صلاحية عرض السجلات:') || '';
+    if (!password) {
+      setNotice('أدخل كلمة مرور المشرف لعرض السجلات.');
+      return;
+    }
+    setSupervisorPassword(password);
+    setAuditLogsLoadingMore(true);
+    try {
+      const result = await loadAuditLogs(supervisorUsername, password, auditLogLoadedStudentId, auditLogNextOffset);
+      setAuditLogs((current) => {
+        const existingIds = new Set(current.map((log) => String(getAdminRecordValue(log, ['log_id']))));
+        return [...current, ...result.logs.filter((log) => !existingIds.has(String(getAdminRecordValue(log, ['log_id']))))];
+      });
+      setAuditLogNextOffset(result.nextOffset);
+    } catch (error) {
+      setNotice(`تعذر تحميل سجلات أقدم: ${getSupabaseErrorText(error)}`);
+    } finally {
+      setAuditLogsLoadingMore(false);
+    }
+  };
   const loadStudentFeedback = async () => {
     const password = supervisorPassword || window.localStorage.getItem(rememberedSupervisorPasswordKey) || '';
     if (!supervisorUsername || !password) {
@@ -1749,12 +1811,18 @@ export default function AttendancePage() {
         message?: string;
         students?: StudentRow[];
         hasMore?: boolean;
+        totalCount?: number;
       };
       if (!response.ok || !result.success) {
         throw new Error(result.message ?? result.error ?? 'تعذر تحميل قائمة الطلاب.');
       }
+      const totalCount = result.totalCount;
+      if (typeof totalCount !== 'number' || !Number.isSafeInteger(totalCount) || totalCount < 0) {
+        throw new Error('تعذر تحميل العدد الإجمالي للطلاب.');
+      }
       setStudentDirectory(Array.isArray(result.students) ? result.students : []);
       setStudentDirectoryHasMore(result.hasMore === true);
+      setStudentDirectoryTotalCount(totalCount);
     } catch (error) {
       setNotice(`تعذر تحميل بيانات الطلاب: ${getSupabaseErrorText(error)}`);
     } finally {
@@ -2173,7 +2241,7 @@ export default function AttendancePage() {
     editableFields.forEach((field) => {
       if (normalizedDraft[field] !== undefined) {
         const value = String(normalizedDraft[field] ?? '').trim();
-        if (value !== '') payload[field] = value;
+        if (value !== '' || field === 'الفئة') payload[field] = value;
       }
     });
 
@@ -2189,7 +2257,7 @@ export default function AttendancePage() {
     }
 
     const cleanPayload = Object.fromEntries(
-      Object.entries(payload).filter(([, value]) => value !== undefined && value !== null && value !== '')
+      Object.entries(payload).filter(([field, value]) => field === 'الفئة' || (value !== undefined && value !== null && value !== ''))
     ) as Record<string, string>;
     const originalStudent = studentDirectory.find((student) => getStudentIdentifier(student) === editingStudentId);
     const originalIdKey = originalStudent?.['الرقم الجامعي'] !== undefined
@@ -2291,6 +2359,98 @@ export default function AttendancePage() {
           message: `تم تعديل بياناتك بواسطة نظام الإدارة:\n${changes}`,
         }),
       }).catch((error) => console.error('Student update email failed:', error));
+    }
+  };
+
+  const deleteStudentAccount = async (student: StudentRow) => {
+    const studentId = getStudentIdentifier(student);
+    if (!studentId) {
+      setNotice('هذا الطالب لا يحتوي على رقم جامعي صالح للحذف.');
+      return;
+    }
+
+    const studentName = getStudentDisplayName(student);
+    if (!window.confirm(`هل تريد حذف حساب الطالب ${studentName} (${studentId}) نهائياً؟`)) return;
+
+    setDeletingStudentId(studentId);
+    try {
+      const response = await fetch('/api/supervisor/student-operations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'delete-student',
+          supervisorUsername,
+          supervisorPassword,
+          studentId,
+        }),
+      });
+      const result = await response.json() as { success?: boolean; error?: string; message?: string };
+      if (!response.ok || !result.success) {
+        const errorMessages: Record<string, string> = {
+          'supervisor-credentials-required': 'انتهت صلاحية جلسة المشرف؛ سجّل الدخول مجدداً.',
+          'supervisor-credentials-invalid': 'تعذر التحقق من بيانات المشرف؛ سجّل الدخول مجدداً.',
+          'first-degree-supervisor-required': 'حذف حساب الطالب متاح لمشرفي الدرجة الأولى فقط.',
+          'student-not-found': 'حساب الطالب غير موجود أو تم حذفه مسبقاً.',
+          'student-delete-failed': 'تعذر حذف حساب الطالب من قاعدة البيانات.',
+        };
+        throw new Error(errorMessages[result.error ?? ''] ?? result.message ?? 'تعذر حذف حساب الطالب.');
+      }
+
+      if (editingStudentId === studentId) {
+        setEditingStudentId('');
+        setEditingStudentDraft({});
+      }
+      setNotice(`تم حذف حساب الطالب ${studentName} (${studentId}).`);
+      await refreshStudentDirectory();
+    } catch (error) {
+      setNotice(`تعذر حذف حساب الطالب: ${getSupabaseErrorText(error)}`);
+    } finally {
+      setDeletingStudentId('');
+    }
+  };
+
+  const openStudentFile = async (student: StudentRow) => {
+    const studentId = getStudentIdentifier(student);
+    if (!studentId) {
+      setNotice('هذا الطالب لا يحتوي على رقم جامعي صالح لعرض ملفه.');
+      return;
+    }
+
+    setSelectedStudentFile(student);
+    setStudentFileGrades(null);
+    setStudentFileGradesError('');
+    setStudentFileGradesLoading(true);
+    try {
+      const response = await fetch('/api/supervisor/student-operations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'student-grades',
+          supervisorUsername,
+          supervisorPassword,
+          studentId,
+        }),
+      });
+      const result = await response.json() as {
+        success?: boolean;
+        error?: string;
+        message?: string;
+        grades?: SupervisorStudentGrade[];
+      };
+      if (!response.ok || !result.success) {
+        const errorMessages: Record<string, string> = {
+          'supervisor-credentials-required': 'انتهت صلاحية جلسة المشرف؛ سجّل الدخول مجدداً.',
+          'supervisor-lookup-failed': 'تعذر التحقق من صلاحية المشرف. حاول مجدداً.',
+          'degree-four-supervisor-required': 'لا تملك صلاحية عرض نتائج هذا الطالب.',
+          'student-grades-load-failed': 'تعذر تحميل النتائج المنشورة للطالب.',
+        };
+        throw new Error(errorMessages[result.error ?? ''] ?? result.message ?? 'تعذر تحميل نتائج الطالب.');
+      }
+      setStudentFileGrades(Array.isArray(result.grades) ? result.grades : []);
+    } catch (error) {
+      setStudentFileGradesError(getSupabaseErrorText(error));
+    } finally {
+      setStudentFileGradesLoading(false);
     }
   };
 
@@ -2495,6 +2655,16 @@ export default function AttendancePage() {
     });
   }, [studentDirectory, studentDirectorySearch, studentClassFilter, studentYearFilter, studentSectionFilter]);
 
+  const studentFileGradesBySubject = useMemo(() => {
+    const groups = new Map<string, SupervisorStudentGrade[]>();
+    (studentFileGrades ?? []).forEach((grade) => {
+      const subjectGrades = groups.get(grade.subject) ?? [];
+      subjectGrades.push(grade);
+      groups.set(grade.subject, subjectGrades);
+    });
+    return Array.from(groups, ([subject, grades]) => ({ subject, grades }));
+  }, [studentFileGrades]);
+
   const filteredAuditLogs = useMemo(() => {
     const searchTerm = auditLogSearch.trim().toLocaleLowerCase();
     return auditLogs.filter((log) => {
@@ -2522,7 +2692,8 @@ export default function AttendancePage() {
         || (auditLogActionType === 'attendance' && /attendance|warning/.test(action))
         || (auditLogActionType === 'management' && /academic_|teacher_account|supervisor_(created|updated|deleted)/.test(action))
         || (auditLogActionType === 'accounts' && /student_(created|updated)|account/.test(action))
-        || (auditLogActionType === 'other' && !/_(login|logout)$|password|class|attendance|warning|created|updated|deleted|account|academic_/.test(action));
+        || (auditLogActionType === 'grades' && /teacher_grade|student_grades_viewed/.test(action))
+        || (auditLogActionType === 'other' && !/_(login|logout)$|password|class|attendance|warning|created|updated|deleted|account|academic_|teacher_grade|student_grades_viewed/.test(action));
       return matchesUser && matchesAction && (!searchTerm || searchableText.includes(searchTerm));
     });
   }, [auditLogs, auditLogSearch, auditLogUserType, auditLogActionType]);
@@ -4598,8 +4769,8 @@ export default function AttendancePage() {
               <input value={newStudentForm['اسم الطالب'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'اسم الطالب': event.target.value })} placeholder="اسم الطالب" required />
               <input value={newStudentForm['اسم الاب'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'اسم الاب': event.target.value })} placeholder="اسم الأب" required />
               <input value={newStudentForm['الكنية'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الكنية': event.target.value })} placeholder="الكنية" required />
-              <select value={newStudentForm['الفئة'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الفئة': event.target.value })} required={supervisorDegree !== '2'}>
-                <option value="">{supervisorDegree === '2' ? 'بدون فئة (اختياري)' : 'اختر الفئة'}</option>
+              <select value={newStudentForm['الفئة'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الفئة': event.target.value })}>
+                <option value="">بدون فئة (اختياري)</option>
                 {getClassOptionsForYear(academicClasses, academicManagementLoaded, newStudentForm['السنه الدراسية'] ?? '').map((className) => <option key={className} value={className}>{className}</option>)}
               </select>
               <select value={newStudentForm['السنه الدراسية'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'السنه الدراسية': event.target.value })} required>
@@ -4707,8 +4878,8 @@ export default function AttendancePage() {
                 <input value={newStudentForm['اسم الطالب'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'اسم الطالب': event.target.value })} placeholder="اسم الطالب" required />
                 <input value={newStudentForm['اسم الاب'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'اسم الاب': event.target.value })} placeholder="اسم الأب" required />
                 <input value={newStudentForm['الكنية'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الكنية': event.target.value })} placeholder="الكنية" required />
-                <select value={newStudentForm['الفئة'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الفئة': event.target.value })} required={supervisorDegree !== '2'}>
-                  <option value="">{supervisorDegree === '2' ? 'بدون فئة (اختياري)' : 'اختر الفئة'}</option>
+                <select value={newStudentForm['الفئة'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'الفئة': event.target.value })}>
+                  <option value="">بدون فئة (اختياري)</option>
                   {getClassOptionsForYear(academicClasses, academicManagementLoaded, newStudentForm['السنه الدراسية'] ?? '').map((className) => <option key={className} value={className}>{className}</option>)}
                 </select>
                 <select value={newStudentForm['السنه الدراسية'] ?? ''} onChange={(event) => setNewStudentForm({ ...newStudentForm, 'السنه الدراسية': event.target.value })} required>
@@ -4728,8 +4899,10 @@ export default function AttendancePage() {
             )}
 
             <div className="student-management-summary">
-              <span>عدد الطلاب في الصفحة: {studentDirectory.length}</span>
+              <span>العدد الكلي المطابق للتصفية: {studentDirectoryTotalCount}</span>
+              <span>المعروض في هذه الصفحة: {studentDirectory.length}</span>
               <span>عامل التصفية الحالي: {studentClassFilter || 'الكل'}</span>
+              <span>السنة: {studentYearFilter || 'كل السنوات'}</span>
             </div>
 
             <div className="student-management-grid">
@@ -4743,6 +4916,7 @@ export default function AttendancePage() {
                 const className = String(student['الفئة'] ?? '').trim() || 'بدون فئة';
                 const email = String(student['البريد الإلكتروني'] ?? '').trim();
                 const phone = String(student['رقم الهاتف'] ?? '').trim();
+                const avatarUrl = String(student.avatar_url ?? '').trim();
                 const chatId = String(student.telegram_chat_id ?? student['telegram_chat_id'] ?? '').trim();
                 const telegramEnabled = student.telegram_notifications_enabled === true
                   || ['true', '1', 'yes'].includes(String(student.telegram_notifications_enabled ?? student['telegram_notifications_enabled'] ?? '').toLowerCase());
@@ -4750,8 +4924,16 @@ export default function AttendancePage() {
                   <article className="student-management-card" key={`${id || name}-${className}`}>
                     <div className="student-management-card-header">
                       <div className="student-management-identity">
-                        {student.avatar_url ? (
-                          <img className="student-management-avatar" src={student.avatar_url} alt={`صورة ${name}`} loading="lazy" />
+                        {avatarUrl ? (
+                          <button
+                            type="button"
+                            className="student-management-avatar-button"
+                            aria-label={`تكبير صورة ${name}`}
+                            title="تكبير الصورة"
+                            onClick={() => setStudentPhotoPreview({ url: avatarUrl, name })}
+                          >
+                            <img className="student-management-avatar" src={avatarUrl} alt={`صورة ${name}`} loading="lazy" />
+                          </button>
                         ) : (
                           <span className="student-management-avatar-placeholder" aria-label="لا توجد صورة شخصية">
                             <UserRound size={32} aria-hidden="true" />
@@ -4768,7 +4950,23 @@ export default function AttendancePage() {
                       <span>الهاتف: {String(student['رقم الهاتف'] ?? 'غير محدد')}</span>
                     </div>
                     <div className="student-management-card-actions">
+                      <button
+                        type="button"
+                        className="action-button"
+                        onClick={() => void openStudentFile(student)}
+                        disabled={studentFileGradesLoading}
+                      >
+                        ملف الطالب والنتائج
+                      </button>
                       <button type="button" className="action-button primary" onClick={() => handleOpenStudentEditor(student)}>تعديل</button>
+                      <button
+                        type="button"
+                        className="action-button danger"
+                        onClick={() => void deleteStudentAccount(student)}
+                        disabled={Boolean(deletingStudentId)}
+                      >
+                        {deletingStudentId === id ? 'جارٍ الحذف...' : 'حذف الحساب'}
+                      </button>
                       {telegramEnabled && chatId ? (
                         <button type="button" className="action-button" style={{ background: '#2563eb', color: '#fff' }} onClick={() => openStudentMessageComposer(student, 'telegram')}>إرسال تلجرام</button>
                       ) : email ? (
@@ -4828,6 +5026,92 @@ export default function AttendancePage() {
                   <button type="button" className="action-button warning" onClick={() => { setEditingStudentId(''); setEditingStudentDraft({}); }}>إلغاء</button>
                 </div>
               </form>
+            )}
+
+            {selectedStudentFile && (
+              <div
+                className="student-message-modal-backdrop"
+                role="presentation"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) setSelectedStudentFile(null);
+                }}
+              >
+                <section
+                  className="student-message-modal student-file-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="student-file-title"
+                >
+                  <div className="student-message-modal-header">
+                    <div>
+                      <span className="feature-panel-kicker">ملف الطالب</span>
+                      <h2 id="student-file-title">{getStudentDisplayName(selectedStudentFile)}</h2>
+                    </div>
+                    <button
+                      type="button"
+                      className="student-message-close"
+                      aria-label="إغلاق ملف الطالب"
+                      onClick={() => setSelectedStudentFile(null)}
+                    >×</button>
+                  </div>
+                  <p className="student-message-meta">
+                    الرقم الجامعي: {getStudentIdentifier(selectedStudentFile) || 'غير محدد'}
+                    {' · '}السنة: {String(selectedStudentFile['السنه الدراسية'] ?? 'غير محددة')}
+                    {' · '}الفئة: {String(selectedStudentFile['الفئة'] ?? '').trim() || 'بدون فئة'}
+                  </p>
+                  <h3>النتائج المنشورة على البوابة</h3>
+                  {studentFileGradesLoading ? (
+                    <p role="status">جارٍ تحميل النتائج...</p>
+                  ) : studentFileGradesError ? (
+                    <p role="alert" className="form-error">{studentFileGradesError}</p>
+                  ) : !studentFileGrades?.length ? (
+                    <p>لم تُدخل نتائج لهذا الطالب حتى الآن.</p>
+                  ) : (
+                    <div className="student-file-grades-list">
+                      {studentFileGradesBySubject.map(({ subject, grades }) => (
+                        <section className="student-file-subject-group" key={subject}>
+                          <h4>{subject}</h4>
+                          <div className="student-file-subject-components">
+                            {grades.map((grade, index) => (
+                              <article className="student-file-grade-row" key={`${grade.component}-${index}`}>
+                                <strong>{grade.component}</strong>
+                                <span>العلامة: <b>{grade.score}</b> / {grade.maxScore}</span>
+                                <span>المدرس: {grade.teacher}</span>
+                                <small>{grade.updatedAt ? new Date(grade.updatedAt).toLocaleString('ar') : 'وقت الإدخال غير متوفر'}</small>
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {studentPhotoPreview && (
+              <div
+                className="student-photo-modal-backdrop"
+                role="presentation"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget) setStudentPhotoPreview(null);
+                }}
+              >
+                <section
+                  className="student-photo-modal"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label={`صورة الطالب ${studentPhotoPreview.name}`}
+                >
+                  <button
+                    type="button"
+                    className="student-message-close"
+                    aria-label="إغلاق الصورة"
+                    onClick={() => setStudentPhotoPreview(null)}
+                  >×</button>
+                  <img src={studentPhotoPreview.url} alt={`صورة الطالب ${studentPhotoPreview.name}`} />
+                </section>
+              </div>
             )}
           </section>
         )}
@@ -4901,10 +5185,11 @@ export default function AttendancePage() {
                   <option value="attendance">الحضور والإنذارات</option>
                   <option value="management">إدارة المدرسين والمواد والفئات</option>
                   <option value="accounts">إدارة حسابات الطلاب</option>
+                  <option value="grades">إدخال العلامات وحذفها</option>
                   <option value="other">عمليات أخرى</option>
                 </select>
               </label>
-              <strong className="audit-log-result-count">النتائج: {filteredAuditLogs.length}</strong>
+              <strong className="audit-log-result-count">النتائج المحمّلة: {filteredAuditLogs.length}</strong>
             </div>
             <div className="audit-log-table-wrap">
               <table className="audit-log-table">
@@ -4972,6 +5257,16 @@ export default function AttendancePage() {
                 </tbody>
               </table>
             </div>
+            {auditLogNextOffset !== null && (
+              <button
+                type="button"
+                className="action-button primary"
+                onClick={() => void loadMoreAuditLogs()}
+                disabled={auditLogsLoadingMore || adminLoading}
+              >
+                {auditLogsLoadingMore ? 'جارٍ تحميل السجلات...' : 'تحميل سجلات أقدم'}
+              </button>
+            )}
           </section>
         )}
 

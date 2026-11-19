@@ -683,6 +683,8 @@ export default function TeacherPortalPage() {
               <TeacherGradesPanel
                 username={credentials.username}
                 password={credentials.password}
+                teacherId={teacher?.id ?? ''}
+                teacherName={teacher?.name ?? credentials.username}
                 selectedSubject={selectedSubject}
                 students={studentsForSubject}
               />

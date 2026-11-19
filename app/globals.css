@@ -6246,6 +6246,21 @@ html[data-theme='dark'] .warning-item.teacher-alert-warning .warning-reason {
   object-fit: cover;
 }
 
+.student-management-avatar-button {
+  display: inline-grid;
+  flex: 0 0 120px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.student-management-avatar-button:focus-visible {
+  outline: 3px solid #2e8b68;
+  outline-offset: 3px;
+}
+
 .student-management-avatar-placeholder {
   background: #edf3ef;
   color: #61766d;
@@ -6323,6 +6338,84 @@ html[data-theme='dark'] .warning-item.teacher-alert-warning .warning-reason {
   border-radius: 16px;
   background: #fff;
   box-shadow: 0 24px 70px rgba(15, 23, 42, 0.24);
+}
+
+.student-file-modal {
+  width: min(760px, 100%);
+  max-height: min(86vh, 900px);
+  overflow-y: auto;
+}
+
+.student-file-modal > h3 {
+  margin: 0 0 12px;
+  color: #294e47;
+}
+
+.student-file-grades-list {
+  display: grid;
+  gap: 10px;
+}
+
+.student-file-subject-group {
+  padding: 12px;
+  border: 1px solid #dce9e3;
+  border-radius: 12px;
+  background: #f8fbf9;
+}
+
+.student-file-subject-group h4 {
+  margin: 0 0 8px;
+  color: #294e47;
+}
+
+.student-file-subject-components {
+  display: grid;
+}
+
+.student-file-grade-row {
+  display: grid;
+  gap: 5px;
+  padding: 10px 0;
+  border-top: 1px solid #dce9e3;
+  color: #52665e;
+}
+
+.student-file-grade-row strong {
+  color: #294e47;
+}
+
+.student-photo-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.student-photo-modal {
+  position: relative;
+  display: grid;
+  max-width: min(96vw, 1000px);
+  max-height: 92vh;
+  place-items: center;
+}
+
+.student-photo-modal img {
+  display: block;
+  max-width: 94vw;
+  max-height: 88vh;
+  border-radius: 12px;
+  object-fit: contain;
+  background: #fff;
+}
+
+.student-photo-modal .student-message-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  z-index: 1;
 }
 
 .student-message-modal-header {
@@ -7800,6 +7893,11 @@ html[data-theme='dark'] .warning-item.teacher-alert-warning .warning-reason {
 
 .action-button.warning {
   background: linear-gradient(135deg, #f2b94b, #d99217);
+  color: #fff;
+}
+
+.action-button.danger {
+  background: linear-gradient(135deg, #ea4c4c, #c62828);
   color: #fff;
 }
 
