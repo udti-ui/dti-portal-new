@@ -8,3 +8,6 @@ npm-debug.log*
 
 # Local Netlify folder
 .netlify
+
+# Contains personal student records; keep it out of public repositories.
+supabase-import-new-students-2026.sql

@@ -22,6 +22,7 @@ import {
 } from '../lib/studentData';
 
 type TabKey = 'announcements' | 'courses' | 'grades' | 'record' | 'status' | 'schedule' | 'skills' | 'attendance' | 'chat' | 'teacher-inquiries';
+type StudentTabGroupKey = 'home' | 'study' | 'follow-up' | 'services';
 type StudentChatNotification = {
   id: string;
   student_id: string;
@@ -655,6 +656,61 @@ export default function Home() {
     ...(hasStudentGroup ? [{ key: 'schedule' as const, label: 'برنامج الدوام' }] : []),
     { key: 'skills', label: 'مهاراتي' },
   ];
+  const studentTabGroupDefinitions: Array<{
+    key: StudentTabGroupKey;
+    label: string;
+    description: string;
+    tabs: TabKey[];
+  }> = [
+    {
+      key: 'home',
+      label: 'الرئيسية',
+      description: 'الإعلانات والتنبيهات المهمة',
+      tabs: ['announcements'],
+    },
+    {
+      key: 'study',
+      label: 'دراستي',
+      description: 'المقررات والعلامات والدوام',
+      tabs: ['courses', 'grades', 'schedule'],
+    },
+    {
+      key: 'follow-up',
+      label: 'متابعتي',
+      description: 'السجل والحالة وتسجيل الحضور',
+      tabs: ['record', 'status', 'attendance'],
+    },
+    {
+      key: 'services',
+      label: 'خدماتي',
+      description: 'المهارات والتواصل والدردشة',
+      tabs: ['skills', 'teacher-inquiries', 'chat'],
+    },
+  ];
+  const studentTabGroups = studentTabGroupDefinitions.map((group) => ({
+    ...group,
+    tabs: tabs.filter((tab) => group.tabs.includes(tab.key)).map((tab) => tab.key),
+  }));
+  const activeStudentTabGroup = studentTabGroups.find((group) => group.tabs.includes(activeTab)) ?? studentTabGroups[0];
+  const openStudentTab = (tabKey: TabKey) => {
+    setActiveTab(tabKey);
+    if (tabKey === 'grades') {
+      setTeacherGradesLoading(true);
+      setTeacherGradeLoadError('');
+      void fetchTeacherGrades().then((result) => {
+        setTeacherGrades(result.data);
+        setTeacherGradeLoadError(result.error?.message ?? '');
+      }).finally(() => setTeacherGradesLoading(false));
+    }
+    writeAuditLog({
+      action: 'student_tab_opened',
+      userType: 'student',
+      userId: loggedStudent?.['الرقم الجامعي'],
+      username: studentFullName,
+      fullName: studentFullName,
+      details: { tab: tabKey },
+    });
+  };
   const groupedTeacherGrades = Array.from(teacherGrades.reduce((groups, grade) => {
     const subjectGrades = groups.get(grade.subject) ?? [];
     subjectGrades.push(grade);
@@ -2852,36 +2908,57 @@ export default function Home() {
           </div>
 
           <div className="tabs-container">
-            <div className="tabs">
-              {tabs.map((tab) => (
+          <div className="student-portal-navigation">
+            <div className="student-portal-navigation-heading">
+              <div>
+                <span>بوابة الطالب</span>
+                <h2>أقسام وخدمات البوابة</h2>
+                <p>اختر القسم أولاً، ثم افتح الخدمة التي تحتاجها.</p>
+              </div>
+              <div className="student-portal-current-section">
+                <span>القسم الحالي</span>
+                <strong>{activeStudentTabGroup.label}</strong>
+              </div>
+            </div>
+
+            <nav className="student-portal-section-grid" aria-label="أقسام بوابة الطالب">
+              {studentTabGroups.map((group, index) => (
                 <button
-                  key={tab.key}
-                  className={`tab ${activeTab === tab.key ? 'active' : ''}`}
+                  key={group.key}
                   type="button"
-                  onClick={() => {
-                    setActiveTab(tab.key);
-                    if (tab.key === 'grades') {
-                      setTeacherGradesLoading(true);
-                      setTeacherGradeLoadError('');
-                      void fetchTeacherGrades().then((result) => {
-                        setTeacherGrades(result.data);
-                        setTeacherGradeLoadError(result.error?.message ?? '');
-                      }).finally(() => setTeacherGradesLoading(false));
-                    }
-                    writeAuditLog({
-                      action: 'student_tab_opened',
-                      userType: 'student',
-                      userId: loggedStudent?.['الرقم الجامعي'],
-                      username: studentFullName,
-                      fullName: studentFullName,
-                      details: { tab: tab.key },
-                    });
-                  }}
+                  className={`student-portal-section-card ${activeStudentTabGroup.key === group.key ? 'active' : ''}`}
+                  aria-pressed={activeStudentTabGroup.key === group.key}
+                  onClick={() => openStudentTab(group.tabs[0])}
                 >
-                  {tab.label}
+                  <span className="student-portal-section-number">{String(index + 1).padStart(2, '0')}</span>
+                  <span className="student-portal-section-copy">
+                    <strong>{group.label}</strong>
+                    <small>{group.description}</small>
+                  </span>
                 </button>
               ))}
-            </div>
+            </nav>
+
+            <nav className="student-portal-service-nav" aria-label={`خدمات قسم ${activeStudentTabGroup.label}`}>
+              <div className="student-portal-service-heading">
+                <strong>خدمات {activeStudentTabGroup.label}</strong>
+                <span>اختر الخدمة لعرض تفاصيلها</span>
+              </div>
+              <div className="student-portal-service-list">
+                {tabs.filter((tab) => activeStudentTabGroup.tabs.includes(tab.key)).map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={`student-portal-service-button ${activeTab === tab.key ? 'active' : ''}`}
+                    aria-current={activeTab === tab.key ? 'page' : undefined}
+                    onClick={() => openStudentTab(tab.key)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </nav>
+          </div>
 
             {activeTab === 'announcements' && loggedStudent && (
               <div className="tab-content active">
